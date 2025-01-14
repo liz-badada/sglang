@@ -621,14 +621,25 @@ def sample_random_requests(
     dataset_path: str,
 ) -> List[Tuple[str, int, int]]:
 
+    # input_lens = np.random.randint(
+    #     max(int(input_len * range_ratio), 1),
+    #     input_len + 1,
+    #     size=num_prompts,
+    # )
+    # output_lens = np.random.randint(
+    #     int(output_len * range_ratio),
+    #     output_len + 1,
+    #     size=num_prompts,
+    # )
+
     input_lens = np.random.randint(
-        max(int(input_len * range_ratio), 1),
-        input_len + 1,
+        max(int(input_len * (1-range_ratio)), 1),
+        int(input_len*(range_ratio + 1)),
         size=num_prompts,
     )
     output_lens = np.random.randint(
-        int(output_len * range_ratio),
-        output_len + 1,
+        max(1, int(output_len * (1-range_ratio))),
+        int(output_len *(range_ratio + 1)),
         size=num_prompts,
     )
 
