@@ -1786,10 +1786,6 @@ def run_scheduler_process(
     try:
         scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, dp_rank)
         print(f"The class of obj1 is: {type(scheduler.tp_worker.worker.model_runner.model.model).__name__}")
-        # from sglang.srt.distributed import get_tensor_model_parallel_rank
-        # if get_tensor_model_parallel_rank() == 0:
-        #     import pdb
-        #     pdb.set_trace()
         if "DeepSeek-V3" in server_args.model_path:
             import types
             from sglang.srt.managers.moe_tracker_layer_print import forward_deepseek_model_layer_print

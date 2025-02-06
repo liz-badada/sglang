@@ -16,6 +16,8 @@ def forward_qwen_model_layer_print(self, input_ids: torch.Tensor, positions: tor
     residual = None
     for i in range(len(self.layers)):
         print(f"[Qwen]: Layer_{i}")
+        moe_tracker_router_hook.moe_tracker_layer_id = i
+        moe_tracker_router_hook.moe_tracker_dict[i] = [0] * self.config.num_experts
         # with open(moe_tracker_router_hook.moe_tracker_log, 'a') as file:
         #     print(f"[Qwen]: Layer_{i}", file=file)
         layer = self.layers[i]
@@ -33,6 +35,8 @@ def forward_deepseek_model_layer_print(self, input_ids: torch.Tensor, positions:
     residual = None
     for i in range(len(self.layers)):
         print(f"[DeepSeek]: Layer_{i}")
+        moe_tracker_router_hook.moe_tracker_layer_id = i
+        moe_tracker_router_hook.moe_tracker_dict[i] = [0] * self.config.num_experts
         # with open(moe_tracker_router_hook.moe_tracker_log, 'a') as file:
         #     print(f"[DeepSeek]: Layer_{i}", file=file)
         layer = self.layers[i]
