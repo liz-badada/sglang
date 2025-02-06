@@ -1791,11 +1791,13 @@ def run_scheduler_process(
         #     import pdb
         #     pdb.set_trace()
         if "DeepSeek-V3" in server_args.model_path:
+            import types
             from sglang.srt.managers.moe_tracker_layer_print import forward_deepseek_model_layer_print
-            scheduler.tp_worker.worker.model_runner.model.model.forward = forward_deepseek_model_layer_print
+            scheduler.tp_worker.worker.model_runner.model.model.forward = types.MethodType(forward_deepseek_model_layer_print, scheduler.tp_worker.worker.model_runner.model.model)
         elif "Qwen1.5-MoE-A2.7B" in server_args.model_path:
+            import types
             from sglang.srt.managers.moe_tracker_layer_print import forward_qwen_model_layer_print
-            scheduler.tp_worker.worker.model_runner.model.model.forward = forward_qwen_model_layer_print
+            scheduler.tp_worker.worker.model_runner.model.model.forward = ypes.MethodType(forward_qwen_model_layer_print, scheduler.tp_worker.worker.model_runner.model.model)
         pipe_writer.send(
             {
                 "status": "ready",
