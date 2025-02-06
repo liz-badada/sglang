@@ -1785,17 +1785,17 @@ def run_scheduler_process(
     # Create a scheduler and run the event loop
     try:
         scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, dp_rank)
-        print(f"The class of obj1 is: {type(scheduler.tp_worker.worker.model_runner.model).__name__}")
+        print(f"The class of obj1 is: {type(scheduler.tp_worker.worker.model_runner.model.model).__name__}")
         # from sglang.srt.distributed import get_tensor_model_parallel_rank
         # if get_tensor_model_parallel_rank() == 0:
         #     import pdb
         #     pdb.set_trace()
         if "DeepSeek-V3" in server_args.model_path:
             from sglang.srt.managers.moe_tracker_layer_print import forward_deepseek_model_layer_print
-            scheduler.tp_worker.worker.model_runner.model.DeepseekV2Model.forward = forward_deepseek_model_layer_print
+            scheduler.tp_worker.worker.model_runner.model.model.forward = forward_deepseek_model_layer_print
         elif "Qwen1.5-MoE-A2.7B" in server_args.model_path:
             from sglang.srt.managers.moe_tracker_layer_print import forward_qwen_model_layer_print
-            scheduler.tp_worker.worker.model_runner.model.Qwen2MoeModel.forward = forward_qwen_model_layer_print
+            scheduler.tp_worker.worker.model_runner.model.model.forward = forward_qwen_model_layer_print
         pipe_writer.send(
             {
                 "status": "ready",
