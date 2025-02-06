@@ -1,34 +1,46 @@
 import torch
+
 from vllm.distributed import (
             tensor_model_parallel_all_reduce,
             )
+
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.models.deepseek_v2 import DeepseekV2Model, DeepseekV2MoE
+from sglang.srt.models.qwen2_moe import Qwen2MoeModel
+from sglang.srt.models.deepseek_v2 import DeepseekV2Model
+
+
+def forward_qwen_model_layer_print(self, input_ids: torch.Tensor, positions: torch.Tensor, forward_batch: ForwardBatch, input_embeds: torch.Tensor = None,) -> torch.Tensor:
+    if input_embeds is None:
+        hidden_states = self.embed_tokens(input_ids)
+    else:
+        hidden_states = input_embeds
+    residual = None
+    for i in range(len(self.layers)):
+        print(f"[Qwen]: Layer_{i}")
+        layer = self.layers[i]
+        hidden_states, residual = layer(
+            positions, hidden_states, forward_batch, residual
+        )
+    hidden_states, _ = self.norm(hidden_states, residual)
+    return hidden_states
 
 
 def forward_deepseek_model_layer_print(self, input_ids: torch.Tensor, positions: torch.Tensor, forward_batch: ForwardBatch,) -> torch.Tensor:
     hidden_states = self.embed_tokens(input_ids)
     residual = None
     for i in range(len(self.layers)):
-        print(f"[DeepSeek MoE Router Analysis]: Layer_{i}")
+        print(f"[DeepSeek]: Layer_{i}")
         layer = self.layers[i]
         hidden_states, residual = layer(positions, hidden_states, forward_batch, residual)
     if not forward_batch.forward_mode.is_idle():
         hidden_states, _ = self.norm(hidden_states, residual)
     return hidden_states
 
-def forward_deepseek_moe_router_analysis(self, hidden_states: torch.Tensor) -> torch.Tensor:
-    num_tokens, hidden_dim = hidden_states.shape
-    print(f"[DeepSeek MoE Router Analysis]: Hidden States Shape {num_tokens, hidden_dim}")
-    hidden_states = hidden_states.view(-1, hidden_dim)
-    if self.n_shared_experts is not None:
-        shared_output = self.shared_experts(hidden_states)
-        # router_logits: (num_tokens, n_experts)
-        router_logits = self.gate(hidden_states)
-        print(f"[DeepSeek MoE Router Analysis]: Router Logits {router_logits}")
-        final_hidden_states = (self.experts(hidden_states=hidden_states, router_logits=router_logits) * self.routed_scaling_factor)
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
-    return final_hidden_states.view(num_tokens, hidden_dim)
+
+def moe_select_experts_tracker(func):
+    def wrapper(*args, **kwargs):
+        topk_weights, topk_ids = func(*args, **kwargs)
+        print(f"[MoE Router Topk]: weights shape {topk_weights.shape}, ids shape {topk_ids.shape}")
+        print(f"[MoE Router TopK]: weights {topk_weights}, ids {topk_ids}")
+        return topk_weights, topk_ids
+    return wrapper

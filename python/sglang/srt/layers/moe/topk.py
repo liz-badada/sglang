@@ -18,6 +18,7 @@ import torch
 import torch.nn.functional as F
 
 from sglang.srt.utils import get_compiler_backend
+from sglang.srt.managers.moe_router_hook import moe_select_experts_tracker
 
 
 def fused_topk_native(
@@ -151,6 +152,7 @@ def biased_grouped_topk(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
+@moe_select_experts_tracker
 def select_experts(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
