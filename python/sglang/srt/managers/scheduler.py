@@ -1786,10 +1786,10 @@ def run_scheduler_process(
     try:
         scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, dp_rank)
         if "DeepSeek-V3" in server_args.model_path:
-            from sglang.srt.managers.moe_router_hook import forward_deepseek_model_layer_print, moe_select_experts_tracker
+            from sglang.srt.managers.moe_tracker_layer_print import forward_deepseek_model_layer_print
             scheduler.tp_worker.worker.model_runner.model.DeepseekV2Model.forward = forward_deepseek_model_layer_print
         elif "Qwen1.5-MoE-A2.7B" in server_args.model_path:
-            from sglang.srt.managers.moe_router_hook import forward_qwen_model_layer_print, moe_select_experts_tracker
+            from sglang.srt.managers.moe_tracker_layer_print import forward_qwen_model_layer_print
             scheduler.tp_worker.worker.model_runner.model.Qwen2MoeModel.forward = forward_qwen_model_layer_print
         pipe_writer.send(
             {

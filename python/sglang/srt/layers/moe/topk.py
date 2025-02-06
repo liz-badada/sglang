@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 
 from sglang.srt.utils import get_compiler_backend
-from sglang.srt.managers.moe_router_hook import moe_select_experts_tracker
+from sglang.srt.managers.moe_tracker_router_hook import moe_select_experts_tracker
 
 
 def fused_topk_native(
