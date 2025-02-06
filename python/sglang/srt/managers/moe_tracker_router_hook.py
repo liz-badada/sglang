@@ -30,8 +30,23 @@ def moe_select_experts_tracker(func):
     return wrapper
 
 
-def moe_tracker_print():
+def moe_tracker_analysis():
     global moe_tracker_dict
     for layer_id, stats in moe_tracker_dict.items():
-        stats_str = " ".join(map(str, stats))
-        print(f"Layer {layer_id}: {stats_str}")
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=list(range(len(stats))),
+            y=stats,
+            marker_color='indigo'
+        ))
+
+        fig.update_layout(
+            title=f"Layer {layer_id} Expert Selection",
+            xaxis_title="Expert ID",
+            yaxis_title="Selection Count",
+            xaxis=dict(dtick=1)
+        )
+
+        file_name = f"layer_{layer_id}_expert_selection.png"
+        fig.write_image(file_name)
+        print(f"Saved {file_name}")
