@@ -481,6 +481,8 @@ class Scheduler:
                 # When the server is idle, so self-check and re-init some states
                 self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
+                from sglang.srt.managers.moe_tracker_router_hook import moe_tracker_analysis
+                moe_tracker_analysis()
 
             self.last_batch = batch
 
@@ -521,6 +523,8 @@ class Scheduler:
                 # When the server is idle, so self-check and re-init some states
                 self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
+                from sglang.srt.managers.moe_tracker_router_hook import moe_tracker_analysis
+                moe_tracker_analysis()
 
             self.last_batch = batch
 
@@ -1818,11 +1822,13 @@ def run_scheduler_process(
         if "DeepSeek-V3" in server_args.model_path:
             import types
             from sglang.srt.managers.moe_tracker_layer_print import forward_deepseek_model_layer_print
-            scheduler.tp_worker.worker.model_runner.model.model.forward = types.MethodType(forward_deepseek_model_layer_print, scheduler.tp_worker.worker.model_runner.model.model)
+            scheduler.tp_worker.worker.model_runner.model.model.forward = types.MethodType(
+                forward_deepseek_model_layer_print, scheduler.tp_worker.worker.model_runner.model.model)
         elif "Qwen1.5-MoE-A2.7B" in server_args.model_path:
             import types
             from sglang.srt.managers.moe_tracker_layer_print import forward_qwen_model_layer_print
-            scheduler.tp_worker.worker.model_runner.model.model.forward = types.MethodType(forward_qwen_model_layer_print, scheduler.tp_worker.worker.model_runner.model.model)
+            scheduler.tp_worker.worker.model_runner.model.model.forward = types.MethodType(
+                forward_qwen_model_layer_print, scheduler.tp_worker.worker.model_runner.model.model)
         pipe_writer.send(
             {
                 "status": "ready",

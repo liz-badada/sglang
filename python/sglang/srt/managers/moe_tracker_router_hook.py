@@ -1,13 +1,20 @@
+import plotly.express as px
+import plotly.graph_objects as go
+
+
 moe_tracker_log = 'moe_tracker_log.txt'
+moe_tracker_num_experts = 0
 moe_tracker_layer_id = 0
 moe_tracker_dict = {}
 
 
 def moe_select_experts_tracker(func):
+    global moe_tracker_num_experts
     global moe_tracker_layer_id
     global moe_tracker_dict
     def wrapper(*args, **kwargs):
         topk_weights, topk_ids = func(*args, **kwargs)
+        flattened_topk_ids = topk_ids.flatten()
 
         print(f"[MoE Router Topk]: weights shape {topk_weights.shape}, ids shape {topk_ids.shape}")
         # print(f"[MoE Router TopK]: weights {topk_weights}, ids {topk_ids}")
@@ -16,11 +23,11 @@ def moe_select_experts_tracker(func):
             raise ValueError(f"Layer ID {moe_tracker_layer_id} not initialized in layer_dict.")
     
         # 遍历 topk_ids 对应的元素累加
-        for idx in topk_ids:
-            if 0 <= idx < len(moe_tracker_dict[moe_tracker_layer_id]):
-                moe_tracker_dict[moe_tracker_layer_id][idx] += 1
-            else:
-                raise IndexError(f"TopK ID {idx} is out of the valid range for given num_experts.")
+        for _, expert_idx in enumerate(flattened_topk_ids):
+            print(expert_idx)
+            assert expert_idx < moe_tracker_num_experts, f"TopK ID {expert_idx} is out of the valid range for given num_experts."
+            moe_tracker_dict[moe_tracker_layer_id][expert_idx] = moe_tracker_dict[moe_tracker_layer_id][expert_idx] + 1
+            print(f"experts: {moe_tracker_num_experts}, layer_id{moe_tracker_layer_id}, expert_id{expert_idx}, count{moe_tracker_dict[moe_tracker_layer_id][expert_idx]}")
 
         # global moe_tracker_log
         # with open(moe_tracker_log, 'a') as file:
