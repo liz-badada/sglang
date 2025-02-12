@@ -526,7 +526,7 @@ class Scheduler:
                 self.new_token_ratio = self.init_new_token_ratio
 
             self.last_batch = batch
-            
+
             from sglang.srt.managers.moe_tracker_router_hook import moe_tracker_analysis
             moe_tracker_analysis()
 
