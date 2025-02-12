@@ -481,10 +481,11 @@ class Scheduler:
                 # When the server is idle, so self-check and re-init some states
                 self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
-                from sglang.srt.managers.moe_tracker_router_hook import moe_tracker_analysis
-                moe_tracker_analysis()
 
             self.last_batch = batch
+
+        from sglang.srt.managers.moe_tracker_router_hook import moe_tracker_analysis
+        moe_tracker_analysis()
 
     @torch.no_grad()
     def event_loop_overlap(self):
@@ -523,10 +524,11 @@ class Scheduler:
                 # When the server is idle, so self-check and re-init some states
                 self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
-                from sglang.srt.managers.moe_tracker_router_hook import moe_tracker_analysis
-                moe_tracker_analysis()
 
             self.last_batch = batch
+            
+            from sglang.srt.managers.moe_tracker_router_hook import moe_tracker_analysis
+            moe_tracker_analysis()
 
     def recv_requests(self) -> List[Req]:
         """Receive results at tp_rank = 0 and broadcast it to all other TP ranks."""
@@ -1821,14 +1823,14 @@ def run_scheduler_process(
         print(f"The class of obj1 is: {type(scheduler.tp_worker.worker.model_runner.model.model).__name__}")
         if "DeepSeek-V3" in server_args.model_path:
             import types
-            from sglang.srt.managers.moe_tracker_layer_print import forward_deepseek_model_layer_print
+            from sglang.srt.managers.moe_tracker_layer_hook import forward_deepseek_model_layer_hook
             scheduler.tp_worker.worker.model_runner.model.model.forward = types.MethodType(
-                forward_deepseek_model_layer_print, scheduler.tp_worker.worker.model_runner.model.model)
+                forward_deepseek_model_layer_hook, scheduler.tp_worker.worker.model_runner.model.model)
         elif "Qwen1.5-MoE-A2.7B" in server_args.model_path:
             import types
-            from sglang.srt.managers.moe_tracker_layer_print import forward_qwen_model_layer_print
+            from sglang.srt.managers.moe_tracker_layer_hook import forward_qwen_model_layer_hook
             scheduler.tp_worker.worker.model_runner.model.model.forward = types.MethodType(
-                forward_qwen_model_layer_print, scheduler.tp_worker.worker.model_runner.model.model)
+                forward_qwen_model_layer_hook, scheduler.tp_worker.worker.model_runner.model.model)
         pipe_writer.send(
             {
                 "status": "ready",

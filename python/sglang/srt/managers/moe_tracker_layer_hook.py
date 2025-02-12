@@ -6,7 +6,8 @@ from sglang.srt.models.deepseek_v2 import DeepseekV2Model
 from sglang.srt.managers import moe_tracker_router_hook
 
 
-def forward_qwen_model_layer_print(self, input_ids: torch.Tensor, positions: torch.Tensor, forward_batch: ForwardBatch, input_embeds: torch.Tensor = None,) -> torch.Tensor:
+def forward_qwen_model_layer_hook(self, input_ids: torch.Tensor, positions: torch.Tensor, forward_batch: ForwardBatch, input_embeds: torch.Tensor = None,) -> torch.Tensor:
+    moe_tracker_router_hook.moe_tracker_model = 'qwen1.5-moe'
     moe_tracker_router_hook.moe_tracker_log = 'qwen_moe_tracker_log.txt'
     moe_tracker_router_hook.moe_tracker_num_experts = 60
 
@@ -16,7 +17,7 @@ def forward_qwen_model_layer_print(self, input_ids: torch.Tensor, positions: tor
         hidden_states = input_embeds
     residual = None
     for i in range(len(self.layers)):
-        print(f"[Qwen]: Layer_{i}")
+        # print(f"[Qwen]: Layer_{i}")
         moe_tracker_router_hook.moe_tracker_layer_id = i
         moe_tracker_router_hook.moe_tracker_dict[i] = [0] * moe_tracker_router_hook.moe_tracker_num_experts
         # with open(moe_tracker_router_hook.moe_tracker_log, 'a') as file:
@@ -29,14 +30,15 @@ def forward_qwen_model_layer_print(self, input_ids: torch.Tensor, positions: tor
     return hidden_states
 
 
-def forward_deepseek_model_layer_print(self, input_ids: torch.Tensor, positions: torch.Tensor, forward_batch: ForwardBatch,) -> torch.Tensor:
+def forward_deepseek_model_layer_hook(self, input_ids: torch.Tensor, positions: torch.Tensor, forward_batch: ForwardBatch,) -> torch.Tensor:
+    moe_tracker_router_hook.moe_tracker_model = 'deepseek-v3'
     moe_tracker_router_hook.moe_tracker_log = 'deepseek_moe_tracker_log.txt'
     moe_tracker_router_hook.moe_tracker_num_experts = 256
     
     hidden_states = self.embed_tokens(input_ids)
     residual = None
     for i in range(len(self.layers)):
-        print(f"[DeepSeek]: Layer_{i}")
+        # print(f"[DeepSeek]: Layer_{i}")
         moe_tracker_router_hook.moe_tracker_layer_id = i
         moe_tracker_router_hook.moe_tracker_dict[i] = [0] * moe_tracker_router_hook.moe_tracker_num_experts
         # with open(moe_tracker_router_hook.moe_tracker_log, 'a') as file:
