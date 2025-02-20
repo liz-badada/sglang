@@ -992,6 +992,8 @@ class Scheduler:
         # Print stats
         if self.attn_tp_rank == 0:
             self.log_prefill_stats(adder, can_run_list, running_bs, has_being_chunked)
+            from sglang.srt.managers import moe_tracker_router_hook
+            moe_tracker_router_hook.moe_tracker_stage = 'prefill'
 
         # Create a new batch
         new_batch = ScheduleBatch.init_new(
@@ -1324,6 +1326,8 @@ class Scheduler:
             and self.forward_ct_decode % self.server_args.decode_log_interval == 0
         ):
             self.log_decode_stats()
+            from sglang.srt.managers import moe_tracker_router_hook
+            moe_tracker_router_hook.moe_tracker_stage = 'decode'
 
     def add_logprob_return_values(
         self,

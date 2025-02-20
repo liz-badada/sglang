@@ -8,6 +8,7 @@ moe_tracker_log = 'moe_tracker_log.txt'
 moe_tracker_num_experts = 0
 moe_tracker_layer_id = 0
 moe_tracker_dict = {}
+moe_tracker_stage = ''
 
 
 def moe_select_experts_tracker(func):
@@ -43,6 +44,7 @@ def moe_tracker_analysis():
     global moe_tracker_model
     global moe_tracker_num_experts
     global moe_tracker_dict
+    global moe_tracker_stage
 
     num_layers = len(moe_tracker_dict.keys())
     if num_layers != 0:
@@ -86,7 +88,7 @@ def moe_tracker_analysis():
         file_dir = f"./moe_tracker_stats/{moe_tracker_model}"
         if not os.path.exists(file_dir):
             os.makedirs(file_dir)
-        file_name = f"{file_dir}/{moe_tracker_model}_all_layers_expert_selection.html"
+        file_name = f"{file_dir}/{moe_tracker_model}_all_layers_expert_selection_{moe_tracker_stage}.html"
 
         fig.write_html(file_name)
         print(f"Saved {file_name}")
