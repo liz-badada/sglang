@@ -100,6 +100,8 @@ from sglang.srt.utils import (
 )
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
+from sglang.srt.managers import moe_tracker_router_hook
+
 logger = logging.getLogger(__name__)
 
 # Test retract decode for debugging purposes
@@ -884,6 +886,7 @@ class Scheduler:
         if new_batch is not None:
             # Run prefill first if possible
             ret = new_batch
+            moe_tracker_router_hook.moe_tracker_stage = 'prefill'
         else:
             # Run decode
             if self.running_batch is None:
@@ -891,6 +894,7 @@ class Scheduler:
             else:
                 self.running_batch = self.update_running_batch(self.running_batch)
                 ret = self.running_batch
+            moe_tracker_router_hook.moe_tracker_stage = 'decode'
 
         # Handle DP attention
         if self.server_args.enable_dp_attention:
@@ -992,8 +996,6 @@ class Scheduler:
         # Print stats
         if self.attn_tp_rank == 0:
             self.log_prefill_stats(adder, can_run_list, running_bs, has_being_chunked)
-            from sglang.srt.managers import moe_tracker_router_hook
-            moe_tracker_router_hook.moe_tracker_stage = 'prefill'
 
         # Create a new batch
         new_batch = ScheduleBatch.init_new(
@@ -1326,8 +1328,6 @@ class Scheduler:
             and self.forward_ct_decode % self.server_args.decode_log_interval == 0
         ):
             self.log_decode_stats()
-            from sglang.srt.managers import moe_tracker_router_hook
-            moe_tracker_router_hook.moe_tracker_stage = 'decode'
 
     def add_logprob_return_values(
         self,
