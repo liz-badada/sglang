@@ -50,9 +50,9 @@ def moe_tracker_analysis():
 
     file_dir = f"./moe_tracker_stats/{moe_tracker_model}"
 
-    # visualize
     num_layers = len(moe_tracker_dict[moe_tracker_stage].keys())
     if num_layers != 0:
+        # visualize
         fig = make_subplots(rows=num_layers, cols=1, subplot_titles=[f"Layer {layer_id} Expert Selection" for layer_id in moe_tracker_dict[moe_tracker_stage].keys()])
 
         for layer_idx, (layer_id, stats) in enumerate(moe_tracker_dict[moe_tracker_stage].items(), start=1):
@@ -97,41 +97,40 @@ def moe_tracker_analysis():
         fig.write_html(file_name)
         print(f"figure saved {file_name}")
 
-    # table
-    analysis_results = {'prefill': [], 'decode': []}
-    for layer_id, stats in moe_tracker_dict[moe_tracker_stage].items():
-        expert_data = pd.DataFrame({
-            'expert_id': range(len(stats)),
-            'tokens': stats
-        })
-
-        sorted_experts = expert_data.sort_values(by='tokens', ascending=False)
-
-        top_3 = sorted_experts.head(3)
-        bottom_3 = sorted_experts.tail(3)
-
-        for i, (index, row) in enumerate(top_3.iterrows(), start=1):
-            analysis_results[moe_tracker_stage].append({
-                'layer_id': layer_id,
-                'position': f"Top-{i}",
-                'expert_id': row['expert_id'],
-                'tokens': row['tokens']
+        # table
+        analysis_results = {'prefill': [], 'decode': []}
+        for layer_id, stats in moe_tracker_dict[moe_tracker_stage].items():
+            expert_data = pd.DataFrame({
+                'expert_id': range(len(stats)),
+                'tokens': stats
             })
-        
-        for i, (index, row) in enumerate(bottom_3.iterrows(), start=1):
-            analysis_results[moe_tracker_stage].append({
-                'layer_id': layer_id,
-                'position': f"Bottom-{i}",
-                'expert_id': row['expert_id'],
-                'tokens': row['tokens']
-            })
-        
+
+            sorted_experts = expert_data.sort_values(by='tokens', ascending=False)
+
+            top_3 = sorted_experts.head(3)
+            bottom_3 = sorted_experts.tail(3)
+
+            for i, (index, row) in enumerate(top_3.iterrows(), start=1):
+                analysis_results[moe_tracker_stage].append({
+                    'layer_id': layer_id,
+                    'position': f"Top-{i}",
+                    'expert_id': row['expert_id'],
+                    'tokens': row['tokens']
+                })
+            
+            for i, (index, row) in enumerate(bottom_3.iterrows(), start=1):
+                analysis_results[moe_tracker_stage].append({
+                    'layer_id': layer_id,
+                    'position': f"Bottom-{i}",
+                    'expert_id': row['expert_id'],
+                    'tokens': row['tokens']
+                })
+
+        df = pd.DataFrame(analysis_results)    
         file_name = f"{file_dir}/{moe_tracker_model}_all_layers_expert_selection_{moe_tracker_stage}.csv"
-        dataframe.to_csv(file_name, index=False)
+        df.to_csv(file_name, index=False)
         print(f"data saved to {file_name}")
     
-    # Create a DataFrame for the results
-    result_df = pd.DataFrame(analysis_results)    
 
 
 '''

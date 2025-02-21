@@ -36,6 +36,7 @@ def forward_deepseek_model_layer_hook(self, input_ids: torch.Tensor, positions: 
     moe_tracker_router_hook.moe_tracker_model = 'deepseek-v3'
     moe_tracker_router_hook.moe_tracker_log = 'deepseek_moe_tracker_log.txt'
     moe_tracker_router_hook.moe_tracker_num_experts = 256 # Currently manually specified
+    moe_tracker_stage = moe_tracker_router_hook.moe_tracker_stage
 
     hidden_states = self.embed_tokens(input_ids)
     residual = None
