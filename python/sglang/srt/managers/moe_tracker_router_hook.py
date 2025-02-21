@@ -27,7 +27,6 @@ def moe_select_experts_tracker(func):
         if moe_tracker_layer_id not in moe_tracker_dict[moe_tracker_stage]:
             raise ValueError(f"Layer ID {moe_tracker_layer_id} not initialized in layer_dict.")
 
-        # 遍历 topk_ids 对应的元素累加
         for _, expert_idx in enumerate(flattened_topk_ids):
             # print(expert_idx)
             assert expert_idx < moe_tracker_num_experts, f"TopK ID {expert_idx} is out of the valid range for given num_experts."
