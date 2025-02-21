@@ -126,7 +126,7 @@ def moe_tracker_analysis():
                     'tokens': row['tokens']
                 })
 
-        df = pd.DataFrame(analysis_results)    
+        df = pd.DataFrame(analysis_results[moe_tracker_stage])    
         file_name = f"{file_dir}/{moe_tracker_model}_all_layers_expert_selection_{moe_tracker_stage}.csv"
         df.to_csv(file_name, index=False)
         print(f"data saved to {file_name}")
