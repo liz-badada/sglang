@@ -9,6 +9,7 @@ def forward_qwen_model_layer_hook(self, input_ids: torch.Tensor, positions: torc
     moe_tracker_router_hook.moe_tracker_model = 'qwen1.5-moe'
     moe_tracker_router_hook.moe_tracker_log = 'qwen_moe_tracker_log.txt'
     moe_tracker_router_hook.moe_tracker_num_experts = 60 # Currently manually specified
+    moe_tracker_stage = moe_tracker_router_hook.moe_tracker_stage
 
     if input_embeds is None:
         hidden_states = self.embed_tokens(input_ids)
@@ -18,8 +19,8 @@ def forward_qwen_model_layer_hook(self, input_ids: torch.Tensor, positions: torc
     for i in range(len(self.layers)):
         # print(f"[Qwen]: Layer_{i}")
         moe_tracker_router_hook.moe_tracker_layer_id = i
-        if i not in moe_tracker_router_hook.moe_tracker_dict:
-            moe_tracker_router_hook.moe_tracker_dict[i] = [0] * moe_tracker_router_hook.moe_tracker_num_experts
+        if i not in moe_tracker_router_hook.moe_tracker_dict[moe_tracker_stage]:
+            moe_tracker_router_hook.moe_tracker_dict[moe_tracker_stage][i] = [0] * moe_tracker_router_hook.moe_tracker_num_experts
         # with open(moe_tracker_router_hook.moe_tracker_log, 'a') as file:
         #     print(f"[Qwen]: Layer_{i}", file=file)
         layer = self.layers[i]
@@ -41,8 +42,8 @@ def forward_deepseek_model_layer_hook(self, input_ids: torch.Tensor, positions: 
     for i in range(len(self.layers)):
         # print(f"[DeepSeek]: Layer_{i}")
         moe_tracker_router_hook.moe_tracker_layer_id = i
-        if i not in moe_tracker_router_hook.moe_tracker_dict:
-            moe_tracker_router_hook.moe_tracker_dict[i] = [0] * moe_tracker_router_hook.moe_tracker_num_experts
+        if i not in moe_tracker_router_hook.moe_tracker_dict[moe_tracker_stage]:
+            moe_tracker_router_hook.moe_tracker_dict[moe_tracker_stage][i] = [0] * moe_tracker_router_hook.moe_tracker_num_experts
         # with open(moe_tracker_router_hook.moe_tracker_log, 'a') as file:
         #     print(f"[DeepSeek]: Layer_{i}", file=file)
         layer = self.layers[i]
