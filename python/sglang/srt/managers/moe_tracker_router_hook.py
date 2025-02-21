@@ -7,7 +7,7 @@ moe_tracker_model = ''
 moe_tracker_log = 'moe_tracker_log.txt'
 moe_tracker_num_experts = 0
 moe_tracker_layer_id = 0
-moe_tracker_dict = {}
+moe_tracker_dict = {'prefill': {}, 'decode': {}}
 moe_tracker_stage = ''
 
 
@@ -15,6 +15,7 @@ def moe_select_experts_tracker(func):
     global moe_tracker_num_experts
     global moe_tracker_layer_id
     global moe_tracker_dict
+    global moe_tracker_stage
     def wrapper(*args, **kwargs):
         topk_weights, topk_ids = func(*args, **kwargs)
         flattened_topk_ids = topk_ids.flatten()
@@ -22,15 +23,15 @@ def moe_select_experts_tracker(func):
         # print(f"[MoE Router Topk]: weights shape {topk_weights.shape}, ids shape {topk_ids.shape}")
         # print(f"[MoE Router TopK]: weights {topk_weights}, ids {topk_ids}")
 
-        if moe_tracker_layer_id not in moe_tracker_dict:
+        if moe_tracker_layer_id not in moe_tracker_dict[moe_tracker_stage]:
             raise ValueError(f"Layer ID {moe_tracker_layer_id} not initialized in layer_dict.")
 
         # 遍历 topk_ids 对应的元素累加
         for _, expert_idx in enumerate(flattened_topk_ids):
             # print(expert_idx)
             assert expert_idx < moe_tracker_num_experts, f"TopK ID {expert_idx} is out of the valid range for given num_experts."
-            moe_tracker_dict[moe_tracker_layer_id][expert_idx] += 1
-            # print(f"experts: {moe_tracker_num_experts}, layer_id{moe_tracker_layer_id}, expert_id{expert_idx}, count{moe_tracker_dict[moe_tracker_layer_id][expert_idx]}")
+            moe_tracker_dict[moe_tracker_stage][moe_tracker_layer_id][expert_idx] += 1
+            # print(f"experts: {moe_tracker_num_experts}, layer_id{moe_tracker_layer_id}, expert_id{expert_idx}, count{moe_tracker_dict[moe_tracker_stage][moe_tracker_layer_id][expert_idx]}")
 
         # global moe_tracker_log
         # with open(moe_tracker_log, 'a') as file:
@@ -46,11 +47,14 @@ def moe_tracker_analysis():
     global moe_tracker_dict
     global moe_tracker_stage
 
-    num_layers = len(moe_tracker_dict.keys())
-    if num_layers != 0:
-        fig = make_subplots(rows=num_layers, cols=1, subplot_titles=[f"Layer {layer_id} Expert Selection" for layer_id in moe_tracker_dict.keys()])
+    file_dir = f"./moe_tracker_stats/{moe_tracker_model}"
 
-        for layer_idx, (layer_id, stats) in enumerate(moe_tracker_dict.items(), start=1):
+    # visualize
+    num_layers = len(moe_tracker_dict[moe_tracker_stage].keys())
+    if num_layers != 0:
+        fig = make_subplots(rows=num_layers, cols=1, subplot_titles=[f"Layer {layer_id} Expert Selection" for layer_id in moe_tracker_dict[moe_tracker_stage].keys()])
+
+        for layer_idx, (layer_id, stats) in enumerate(moe_tracker_dict[moe_tracker_stage].items(), start=1):
             # print(f"experts: {moe_tracker_num_experts}, layer_id{layer_id}, expert_stats{stats}")
 
             total_count = sum(stats)
@@ -85,13 +89,48 @@ def moe_tracker_analysis():
         fig.update_xaxes(title_text="Expert Index", dtick=1)
         fig.update_yaxes(title_text="Selection Count")
 
-        file_dir = f"./moe_tracker_stats/{moe_tracker_model}"
         if not os.path.exists(file_dir):
             os.makedirs(file_dir)
         file_name = f"{file_dir}/{moe_tracker_model}_all_layers_expert_selection_{moe_tracker_stage}.html"
 
         fig.write_html(file_name)
-        print(f"Saved {file_name}")
+        print(f"figure saved {file_name}")
+
+    # table
+    analysis_results = {'prefill': [], 'decode': []}
+    for layer_id, stats in moe_tracker_dict[moe_tracker_stage].items():
+        expert_data = pd.DataFrame({
+            'expert_id': range(len(stats)),
+            'tokens': stats
+        })
+
+        sorted_experts = expert_data.sort_values(by='tokens', ascending=False)
+
+        top_3 = sorted_experts.head(3)
+        bottom_3 = sorted_experts.tail(3)
+
+        for i, (index, row) in enumerate(top_3.iterrows(), start=1):
+            analysis_results[moe_tracker_stage].append({
+                'layer_id': layer_id,
+                'position': f"Top-{i}",
+                'expert_id': row['expert_id'],
+                'tokens': row['tokens']
+            })
+        
+        for i, (index, row) in enumerate(bottom_3.iterrows(), start=1):
+            analysis_results[moe_tracker_stage].append({
+                'layer_id': layer_id,
+                'position': f"Bottom-{i}",
+                'expert_id': row['expert_id'],
+                'tokens': row['tokens']
+            })
+        
+        file_name = f"{file_dir}/{moe_tracker_model}_all_layers_expert_selection_{moe_tracker_stage}.csv"
+        dataframe.to_csv(file_name, index=False)
+        print(f"data saved to {file_name}")
+    
+    # Create a DataFrame for the results
+    result_df = pd.DataFrame(analysis_results)    
 
 
 '''
