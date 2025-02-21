@@ -881,6 +881,7 @@ class Scheduler:
                     self.running_batch = self.last_batch
                 else:
                     self.running_batch.merge_batch(self.last_batch)
+            moe_tracker_router_hook.moe_tracker_stage = 'prefill'
 
         new_batch = self.get_new_batch_prefill()
         if new_batch is not None:
