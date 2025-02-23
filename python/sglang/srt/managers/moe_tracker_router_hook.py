@@ -109,21 +109,33 @@ def moe_tracker_analysis():
             top_3 = sorted_experts.head(3)
             bottom_3 = sorted_experts.tail(3)
 
-            for i, (index, row) in enumerate(top_3.iterrows(), start=1):
-                analysis_results[moe_tracker_stage].append({
-                    'layer_id': layer_id,
-                    'position': f"Top-{i}",
-                    'expert_id': row['expert_id'],
-                    'tokens': row['tokens']
-                })
+            layer_result = {
+                'layer_id': layer_id,
+                'top-1': f"Expert {top_3.iloc[0]['expert_id']}: {top_3.iloc[0]['tokens']}",
+                'top-2': f"Expert {top_3.iloc[1]['expert_id']}: {top_3.iloc[1]['tokens']}",
+                'top-3': f"Expert {top_3.iloc[2]['expert_id']}: {top_3.iloc[2]['tokens']}",
+                'last-3': f"Expert {bottom_3.iloc[0]['expert_id']}: {bottom_3.iloc[0]['tokens']}",
+                'last-2': f"Expert {bottom_3.iloc[1]['expert_id']}: {bottom_3.iloc[1]['tokens']}",
+                'last-1': f"Expert {bottom_3.iloc[2]['expert_id']}: {bottom_3.iloc[2]['tokens']}",
+            }
+
+            analysis_results[moe_tracker_stage].append(layer_result)
+
+            # for i, (index, row) in enumerate(top_3.iterrows(), start=1):
+            #     analysis_results[moe_tracker_stage].append({
+            #         'layer_id': layer_id,
+            #         'position': f"Top-{i}",
+            #         'expert_id': row['expert_id'],
+            #         'tokens': row['tokens']
+            #     })
             
-            for i, (index, row) in enumerate(bottom_3.iterrows(), start=1):
-                analysis_results[moe_tracker_stage].append({
-                    'layer_id': layer_id,
-                    'position': f"Bottom-{i}",
-                    'expert_id': row['expert_id'],
-                    'tokens': row['tokens']
-                })
+            # for i, (index, row) in enumerate(bottom_3.iterrows(), start=1):
+            #     analysis_results[moe_tracker_stage].append({
+            #         'layer_id': layer_id,
+            #         'position': f"Bottom-{i}",
+            #         'expert_id': row['expert_id'],
+            #         'tokens': row['tokens']
+            #     })
 
         df = pd.DataFrame(analysis_results[moe_tracker_stage])    
         file_name = f"{file_dir}/{moe_tracker_model}_all_layers_expert_selection_{moe_tracker_stage}.csv"
