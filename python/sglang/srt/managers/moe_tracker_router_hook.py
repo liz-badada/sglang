@@ -26,6 +26,8 @@ def moe_select_experts_tracker(func):
 
         if moe_tracker_layer_id not in moe_tracker_dict[moe_tracker_stage]:
             raise ValueError(f"Layer ID {moe_tracker_layer_id} not initialized in layer_dict.")
+        if moe_tracker_stage == '':
+            raise ValueError(f"Running stage {moe_tracker_stage} known.")
 
         for _, expert_idx in enumerate(flattened_topk_ids):
             # print(expert_idx)
