@@ -24,10 +24,10 @@ def moe_select_experts_tracker(func):
         # print(f"[MoE Router Topk]: weights shape {topk_weights.shape}, ids shape {topk_ids.shape}")
         # print(f"[MoE Router TopK]: weights {topk_weights}, ids {topk_ids}")
 
+        if moe_tracker_stage == '':
+            raise ValueError(f"Running stage {moe_tracker_stage} unknown.")
         if moe_tracker_layer_id not in moe_tracker_dict[moe_tracker_stage]:
             raise ValueError(f"Layer ID {moe_tracker_layer_id} not initialized in layer_dict.")
-        if moe_tracker_stage == '':
-            raise ValueError(f"Running stage {moe_tracker_stage} known.")
 
         for _, expert_idx in enumerate(flattened_topk_ids):
             # print(expert_idx)
