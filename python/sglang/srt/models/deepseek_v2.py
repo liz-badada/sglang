@@ -26,6 +26,7 @@ from transformers import PretrainedConfig
 from vllm import _custom_ops as ops
 
 from sglang.srt.distributed import (
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -1051,7 +1052,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         # Scatter
-        if self.dp_size != 1:
+        if self.dp_size != 1 and not global_server_args_dict["enable_deepep_moe"]:
             # important: forward batch.gathered_buffer is used both after scatter and after gather.
             # be careful about this!
             hidden_states, global_hidden_states = (
@@ -1071,11 +1072,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         if get_tensor_model_parallel_world_size() > 1:
             # all gather and all reduce
             if self.dp_size != 1:
-                if global_server_args_dict["enable_deepep_moe"] and isinstance(
-                    self.mlp, DeepseekV2MoE
-                ):
-                    hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
-                else:
+                if not global_server_args_dict["enable_deepep_moe"]:
                     hidden_states, local_hidden_states = (
                         forward_batch.gathered_buffer,
                         hidden_states,
@@ -1083,6 +1080,9 @@ class DeepseekV2DecoderLayer(nn.Module):
                     dp_gather(
                         hidden_states, local_hidden_states, forward_batch, self.layer_id
                     )
+                else:
+                    # TODO: check if dp_size == tp_size == ep_size
+                    pass
             else:
                 hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
@@ -1135,7 +1135,7 @@ class DeepseekV2Model(nn.Module):
     ) -> torch.Tensor:
 
         # Gather
-        if self.dp_size != 1:
+        if self.dp_size != 1 and not global_server_args_dict["enable_deepep_moe"]:
             input_ids, local_input_ids = (
                 torch.empty(
                     (forward_batch.gathered_buffer.shape[0],),
@@ -1147,6 +1147,9 @@ class DeepseekV2Model(nn.Module):
             dp_gather(input_ids, local_input_ids, forward_batch, "embedding")
 
         hidden_states = self.embed_tokens(input_ids)
+        if input_ids.shape[0] == 0:
+            return hidden_states
+
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -1190,7 +1193,7 @@ class DeepseekV2ForCausalLM(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, forward_batch)
 
-        if self.dp_size != 1:
+        if self.dp_size != 1 and not global_server_args_dict["enable_deepep_moe"]:
             # important: forward batch.gathered_buffer is used both after scatter and after gather.
             # be careful about this!
             hidden_states, global_hidden_states = (
