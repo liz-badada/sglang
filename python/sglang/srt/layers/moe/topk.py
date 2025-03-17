@@ -17,8 +17,10 @@ from typing import Callable, Optional
 import torch
 import torch.nn.functional as F
 
-from sglang.srt.utils import get_compiler_backend
 from sglang.srt.managers.moe_tracker_router_hook import moe_select_experts_tracker
+from sglang.srt.utils import get_compiler_backend, is_cuda
+
+_is_cuda = is_cuda()
 
 
 def fused_topk_native(
@@ -48,7 +50,10 @@ def fused_topk(
     topk: int,
     renormalize: bool,
 ):
-    from vllm import _custom_ops as ops
+    if _is_cuda:
+        from sgl_kernel import topk_softmax
+    else:
+        from vllm import _custom_ops as ops
 
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
 
@@ -62,12 +67,20 @@ def fused_topk(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
-    ops.topk_softmax(
-        topk_weights,
-        topk_ids,
-        token_expert_indicies,
-        gating_output.float(),
-    )
+    if _is_cuda:
+        topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indicies,
+            gating_output.float(),
+        )
+    else:
+        ops.topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indicies,
+            gating_output.float(),
+        )
     del token_expert_indicies
 
     if renormalize:
