@@ -13,14 +13,22 @@ separate region at the end of each page.
 
 import logging
 import math
+from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
 
 from sglang.srt.environ import envs
+from sglang.srt.utils import is_hip
 
 logger = logging.getLogger(__name__)
+_is_hip = is_hip()
+
+_GLM_DSA_MODEL_ARCHS = (
+    "GlmMoeDsaForCausalLM",
+    "GlmMoeDsaForCausalLMNextN",
+)
 
 # Page layout constants for DSv4-Flash (MODEL1):
 #   nope_dim = 448, rope_dim = 64, quantize_block_size = 64
@@ -225,11 +233,11 @@ def _flash_mla_sm120_prefill(
     kv_u8 = k_cache.view(torch.uint8) if k_cache.dtype != torch.uint8 else k_cache
     src_pbs = k_cache.shape[1] if k_cache.ndim >= 3 else _PBS_SRC
     idx = indices.squeeze(1) if indices.dim() == 3 else indices
-    if src_pbs != _PBS_DST:
-        rmask = _build_ref_page_mask(kv_u8, src_pbs, idx)
-        kv_64 = _split_kv_pages_to_64(kv_u8, src_pbs, rmask)
-    else:
-        kv_64 = kv_u8
+    kv_64 = (
+        _split_kv_pages_to_64(kv_u8, src_pbs, touched_indices=idx)
+        if src_pbs != _PBS_DST
+        else kv_u8
+    )
     extra_kv_u8 = (
         extra_k_cache.view(torch.uint8)
         if extra_k_cache is not None and extra_k_cache.dtype != torch.uint8
@@ -370,19 +378,24 @@ def _page_split_kernel(
     DST_SCALE_OFF: tl.constexpr,  # 64 * 576 = 36864
     RATIO: tl.constexpr,  # 4
     BLOCK_SIZE: tl.constexpr,
+    mask_ptr,
+    HAS_MASK: tl.constexpr,
 ):
-    """Fused page-split: copy data+scale for all sub-pages in one kernel."""
+    """Fused page-split: copy data+scale for all sub-pages in one kernel.
+
+    When HAS_MASK is set, only pages flagged in ``mask_ptr`` (int8, 1=touched)
+    are copied; untouched pages are skipped so the kernel no longer rewrites the
+    entire KV pool every decode step.
+    """
     pid = tl.program_id(0)
     page_idx = pid // RATIO
     sub = pid % RATIO
 
     if page_idx >= N_pages:
         return
-    # Dirty-skip: only copy pages referenced by this step's sparse indices.
-    # The persistent dst buffer keeps prior contents for unreferenced pages,
-    # which are never read by this call (identity index mapping preserved).
-    if tl.load(ref_mask_ptr + page_idx) == 0:
-        return
+    if HAS_MASK:
+        if tl.load(mask_ptr + page_idx) == 0:
+            return
 
     # All layout strides/offsets are 8-byte aligned (asserted at the call
     # site), so copy in u64 lanes instead of single bytes.
@@ -411,35 +424,43 @@ def _page_split_kernel(
         tl.store(dst_base + DST_SCALE_OFF // 8 + offs, vals, mask=mask)
 
 
-def _build_ref_page_mask(kv_u8, src_pbs, idx):
-    """Mark the source pages referenced by this step's sparse indices in a
-    grow-only per-device mask so the split kernel can skip the rest.
-    Static shapes -> CUDA-graph safe."""
-    from sglang.srt.runtime_context import get_resources
+@triton.jit
+def _page_mark_kernel(
+    indices_ptr,
+    mask_ptr,
+    N_idx,
+    SRC_PBS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Mark touched source pages (1 byte each) from token-level indices.
 
-    N_src = kv_u8.shape[0]
-    buffers = get_resources().buffers
-    rmask_key = f"flash_mla_sm120_refmask:{kv_u8.device}"
-    rmask = buffers.get(rmask_key)
-    if rmask is None or rmask.shape[0] < N_src:
-        rmask = torch.zeros(N_src, dtype=torch.uint8, device=kv_u8.device)
-        buffers[rmask_key] = rmask
-    rmask = rmask[:N_src]
-    rmask.zero_()
-    ref_pages = torch.clamp(idx.reshape(-1) // src_pbs, min=0, max=N_src - 1).to(
-        torch.long
-    )
-    rmask.index_fill_(0, ref_pages, 1)
-    return rmask
+    ``indices`` are token indices into the pbs=SRC_PBS SWA pool; -1 = invalid.
+    Each valid token marks ``mask[token // SRC_PBS] = 1``. Concurrent stores of
+    the same value 1 are safe (no atomic needed).
+    """
+    pid = tl.program_id(0)
+    if pid >= N_idx:
+        return
+    idx = tl.load(indices_ptr + pid)
+    if idx < 0:
+        return
+    page = idx // SRC_PBS
+    tl.store(mask_ptr + page, 1)
 
 
 def _split_kv_pages_to_64(
-    kv_u8: torch.Tensor, src_pbs: int, ref_mask: torch.Tensor
+    kv_u8: torch.Tensor,
+    src_pbs: int,
+    touched_indices: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Split pbs=N footer-format pages into pbs=64 footer-format pages.
 
-    Uses a fused Triton kernel to do all sub-page copies in a single launch
-    instead of 8 separate copy kernels (4 sub-pages × 2 regions).
+    When ``touched_indices`` (token-level int32 indices into the pbs=src_pbs
+    SWA pool, -1 = invalid) is provided, only the source pages that actually
+    contain a referenced token are copied. This avoids rewriting the entire KV
+    pool on every decode step (only ~2*batch pages are touched vs the full
+    pool). The output buffer is persistent and reused across steps; untouched
+    dst pages simply retain their (unreferenced) stale data.
     """
     assert src_pbs % _PBS_DST == 0 and src_pbs >= _PBS_DST
     if src_pbs == _PBS_DST:
@@ -457,12 +478,16 @@ def _split_kv_pages_to_64(
     key = f"flash_mla_sm120_split:{dev}"
     buf = buffers.get(key)
     if buf is None or buf.shape[0] < num_dst_pages:
-        buf = torch.empty(
-            num_dst_pages,
-            _BYTES_PER_DST_PAGE_PADDED,
-            dtype=torch.uint8,
-            device=dev,
-        )
+        # The first allocation can happen under inference mode (autotune), but
+        # the buffer is written again during CUDA graph capture outside
+        # inference mode, where an inference tensor cannot be mutated.
+        with torch.inference_mode(False):
+            buf = torch.empty(
+                num_dst_pages,
+                _BYTES_PER_DST_PAGE_PADDED,
+                dtype=torch.uint8,
+                device=dev,
+            )
         buffers[key] = buf
     out = buf[:num_dst_pages]
 
@@ -475,11 +500,38 @@ def _split_kv_pages_to_64(
         src_stride0 = src_2d.stride(0)
 
     assert src_stride0 % 8 == 0 and _BYTES_PER_DST_PAGE_PADDED % 8 == 0
+    use_mask = touched_indices is not None and touched_indices.numel() > 0
+    mask_ptr = src_2d  # dummy, never dereferenced when HAS_MASK is False
+    if use_mask:
+        # Persistent per-device int8 mask, zeroed each call (cheap memset,
+        # captured cleanly by CUDA graph). 1 = page is referenced this step.
+        mkey = f"flash_mla_sm120_mask:{dev}"
+        mbuf = buffers.get(mkey)
+        if mbuf is None or mbuf.shape[0] < N:
+            # The first allocation can happen under inference mode (autotune),
+            # but the buffer is zeroed again later during CUDA graph capture
+            # outside inference mode -- an inference tensor cannot be mutated
+            # there, so force a normal tensor.
+            with torch.inference_mode(False):
+                mbuf = torch.empty(N, dtype=torch.int8, device=dev)
+            buffers[mkey] = mbuf
+        mask = mbuf[:N]
+        mask.zero_()
+        idx_flat = touched_indices.reshape(-1).contiguous()
+        if idx_flat.dtype != torch.int32:
+            idx_flat = idx_flat.to(torch.int32)
+        _page_mark_kernel[(idx_flat.numel(),)](
+            idx_flat,
+            mask,
+            idx_flat.numel(),
+            src_pbs,  # SRC_PBS
+            1024,  # BLOCK (unused, kept for JIT signature)
+        )
+        mask_ptr = mask
     grid = (N * ratio,)
     _page_split_kernel[grid](
         src_2d,
         out,
-        ref_mask,
         N,
         src_stride0,
         _BYTES_PER_DST_PAGE_PADDED,
@@ -489,6 +541,8 @@ def _split_kv_pages_to_64(
         _PBS_DST * _NOPE_ROPE_STRIDE,  # DST_SCALE_OFF = 36864
         ratio,  # RATIO = 4
         1024,  # BLOCK_SIZE
+        mask_ptr,
+        use_mask,  # HAS_MASK
     )
 
     bpt = _NOPE_ROPE_STRIDE + _SCALE_STRIDE  # 584
@@ -527,17 +581,19 @@ def _flash_mla_flashinfer(
     B, _, H, D = q.shape  # (batch, 1, num_heads, head_dim)
     dev = q.device
 
-    # --- Page-split: convert pbs=N kv_cache to pbs=64 view ---
-    kv_u8 = k_cache.view(torch.uint8) if k_cache.dtype != torch.uint8 else k_cache
-    src_pbs = k_cache.shape[1] if k_cache.ndim >= 3 else _PBS_SRC
     # Indices: no remapping needed (page-split preserves token addressing).
     idx = indices.squeeze(1) if indices.dim() == 3 else indices
-    if src_pbs != _PBS_DST:
-        # Avoids re-copying the whole KV pool (~105MB/layer) every step.
-        rmask = _build_ref_page_mask(kv_u8, src_pbs, idx)
-        kv_64 = _split_kv_pages_to_64(kv_u8, src_pbs, rmask)
-    else:
-        kv_64 = kv_u8
+
+    # --- Page-split: convert pbs=N kv_cache to pbs=64 view ---
+    # Only the SWA pages actually referenced by `idx` are copied (the rest of
+    # the persistent dst buffer is left untouched and never read).
+    kv_u8 = k_cache.view(torch.uint8) if k_cache.dtype != torch.uint8 else k_cache
+    src_pbs = k_cache.shape[1] if k_cache.ndim >= 3 else _PBS_SRC
+    kv_64 = (
+        _split_kv_pages_to_64(kv_u8, src_pbs, touched_indices=idx)
+        if src_pbs != _PBS_DST
+        else kv_u8
+    )
 
     extra_kv_u8 = (
         extra_k_cache.view(torch.uint8)
@@ -589,3 +645,78 @@ def _flash_mla_flashinfer(
     )
 
     return (output.unsqueeze(1), None)
+
+
+def _validate_flashinfer_sparse_mla_backend(
+    *,
+    model_arch: str,
+    device_sm_major: int,
+    kv_cache_dtype: torch.dtype,
+    prefill_impl: str,
+    decode_impl: str,
+) -> bool:
+    selected = {prefill_impl, decode_impl}
+    uses_flashinfer_sparse_mla = "flashinfer_sparse_mla" in selected
+    is_glm_sm12_fp8 = (
+        model_arch in _GLM_DSA_MODEL_ARCHS
+        and device_sm_major == 12
+        and kv_cache_dtype == torch.float8_e4m3fn
+        and not _is_hip
+    )
+    if uses_flashinfer_sparse_mla and not is_glm_sm12_fp8:
+        raise ValueError(
+            "flashinfer_sparse_mla supports only GLM DSA with FP8 KV cache "
+            "on NVIDIA SM120/SM121; "
+            f"got model_arch={model_arch!r}, sm_major={device_sm_major}, "
+            f"kv_cache_dtype={kv_cache_dtype}, prefill_impl={prefill_impl!r}, "
+            f"decode_impl={decode_impl!r}."
+        )
+    if is_glm_sm12_fp8:
+        unsupported = selected - {"flashinfer_sparse_mla"}
+        if unsupported:
+            raise ValueError(
+                "GLM DSA with FP8 KV cache on NVIDIA SM120/SM121 supports "
+                "only flashinfer_sparse_mla, "
+                f"but got {sorted(unsupported)}."
+            )
+    return uses_flashinfer_sparse_mla
+
+
+def flashinfer_sparse_mla_forward(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    indices: torch.Tensor,
+    seq_lens: torch.Tensor,
+    workspace_buffer: torch.Tensor,
+    *,
+    page_size: int,
+    kv_cache_dim: int,
+    qk_nope_head_dim: int,
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    sm_scale: float,
+    skip_softmax_threshold_scale_factor: float | None,
+) -> torch.Tensor:
+    """Run FlashInfer's SM120 sparse MLA kernel on SGLang's packed DSA cache."""
+    from flashinfer.mla import trtllm_batch_decode_with_kv_cache_mla
+
+    topk = indices.shape[1]
+    result = trtllm_batch_decode_with_kv_cache_mla(
+        query=q.unsqueeze(1),
+        kv_cache=kv_cache.view(torch.uint8)
+        .view(-1, page_size, kv_cache_dim)
+        .unsqueeze(1),
+        workspace_buffer=workspace_buffer,
+        qk_nope_head_dim=qk_nope_head_dim,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        block_tables=indices.unsqueeze(1),
+        seq_lens=seq_lens,
+        max_seq_len=topk,
+        sparse_mla_top_k=topk,
+        bmm1_scale=float(sm_scale),
+        bmm2_scale=1.0,
+        kv_scale_format="arbitrary_fp32",
+        skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
+    )
+    return result.squeeze(1)

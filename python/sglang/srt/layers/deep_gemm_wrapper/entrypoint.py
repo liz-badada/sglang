@@ -20,11 +20,32 @@ if ENABLE_JIT_DEEPGEMM:
     import deep_gemm
 
     try:
-        from deep_gemm.utils.layout import (  # noqa: F401
-            get_mn_major_tma_aligned_tensor,
+        from deep_gemm.utils.layout import (
+            get_mn_major_tma_aligned_tensor as _get_mn_major_tma_aligned_tensor,
         )
     except ImportError:
-        from deep_gemm import get_mn_major_tma_aligned_tensor  # noqa: F401
+        from deep_gemm import (
+            get_mn_major_tma_aligned_tensor as _get_mn_major_tma_aligned_tensor,
+        )
+
+    def get_mn_major_tma_aligned_tensor(sf: torch.Tensor) -> torch.Tensor:
+        """Transform ``sf`` into an MN-major, TMA-aligned layout for DeepGEMM.
+
+        When ``sf`` is already in that layout, sgl-deep-gemm's fast path
+        (<= 0.1.4.post1) returns a NON-OWNING ``torch::from_blob`` alias of
+        ``sf`` across the TVM-FFI boundary. Callers rebind the result over
+        their only reference (``x = get_mn_major_tma_aligned_tensor(x)``),
+        which frees the storage while the GEMM still reads through the alias
+        -- a use-after-free that surfaces as NaN logits or "pointer resides
+        on host memory" during CUDA graph capture once the allocator reuses
+        the block. Hand back ``sf`` itself in that case so ownership is
+        preserved.
+        """
+        out = _get_mn_major_tma_aligned_tensor(sf)
+        if out.data_ptr() == sf.data_ptr():
+            assert out.shape == sf.shape and out.stride() == sf.stride()
+            return sf
+        return out
 
 _SANITY_CHECK = envs.SGLANG_DEEPGEMM_SANITY_CHECK.get()
 

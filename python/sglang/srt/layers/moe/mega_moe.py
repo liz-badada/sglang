@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from sglang.jit_kernel.dsv4.moe import (
+from sglang.kernels.ops.attention.dsv4 import (
     mega_moe_pre_dispatch,
     mega_moe_pre_dispatch_sm90,
 )
@@ -140,8 +140,6 @@ def _get_mega_moe_symm_buffer(
 ) -> SymmBuffer:
     import deep_gemm
 
-    _apply_mega_moe_dg_env()
-
     key = (
         id(group),
         num_max_tokens_per_rank,
@@ -251,7 +249,6 @@ def should_use_mega_moe(moe: "DeepseekV2MoE", hidden_states: torch.Tensor) -> bo
     max_tokens_per_rank = _get_effective_num_tokens(config, hidden_states.shape[0])
     if is_capture_mode:
         return True
-
     cap = envs.SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK.get()
     return max_tokens_per_rank <= cap
 
@@ -399,7 +396,6 @@ def _run_mega_routed(
             padded_topk_weights[:num_tokens].copy_(topk_weights_in)
         topk_ids_in = padded_topk_ids
         topk_weights_in = padded_topk_weights
-
 
     fused_routed_scaling = False
 
