@@ -1342,6 +1342,15 @@ class Envs:
     SGLANG_OPT_FUSE_WQA_WKV = EnvBool(True)
     SGLANG_OPT_USE_MULTI_STREAM_OVERLAP = EnvBool(True)
 
+    # xutizhou/DeepGEMM compatibility.  The forked DeepGEMM runner retained
+    # these switches when it was rebased onto upstream main, so keep their
+    # declarations alongside the upstream DSV4 environment registry.
+    SGLANG_OPT_USE_JIT_EP_ACTIVATION = EnvBool(True)
+    SGLANG_OPT_SWIGLU_CLAMP_FUSION = EnvBool(True)
+    SGLANG_OPT_FIX_MEGA_MOE_MEMORY = EnvBool(False)
+    SGLANG_OPT_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS = EnvBool(False)
+    SGLANG_OPT_DEEPGEMM_MEGA_MOE_USE_MXF4_KIND = EnvBool(False)
+
     # ===================================================================
     # Inkling
     # ===================================================================
@@ -1690,12 +1699,6 @@ _DEPRECATED_ENVS: Dict[str, _DeprecatedEnv] = {
     "SGLANG_CUTLASS_MOE": _DeprecatedEnv(
         note="Please use '--moe-runner-backend=cutlass' and/or "
         "'--speculative-moe-runner-backend=cutlass' instead."
-    ),
-    "SGLANG_OPT_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS": _DeprecatedEnv(
-        note="Please use '--enable-w4a4-mxfp4-megamoe' instead."
-    ),
-    "SGLANG_OPT_DEEPGEMM_MEGA_MOE_USE_MXF4_KIND": _DeprecatedEnv(
-        note="Please use '--enable-w4a4-mxfp4-megamoe' instead."
     ),
     "SGLANG_DFLASH_PREFILL_REFILL_TARGET": _DeprecatedEnv(
         note="DFlash now auto-enables the min-free-slots delay; unset this env. "
