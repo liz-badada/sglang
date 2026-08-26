@@ -963,6 +963,7 @@ class Envs:
     # Route DeepSeek-V4 decode through the Triton sparse-MLA kernel, reading the
     # paged fp8 pools natively. Off by default and independent of the prefill
     # switch: prefill consumes a dequantised workspace that decode does not have.
+    # Independent is enforced, not incidental: prefill never takes this route.
     SGLANG_DSV4_TRITON_DECODE = EnvBool(False)
     # Candidate-list splits for that path. 0 = choose host-side from the batch
     # and candidate count; 1 = the unsplit kernel, bit for bit.

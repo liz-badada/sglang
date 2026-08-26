@@ -1726,8 +1726,12 @@ class DeepseekV4AttnBackend(
             # take the sparse-prefill route instead of falling through to
             # flash_mla_with_kvcache_sm120, which transcodes the page pool
             # 256 -> 64 before every FlashInfer call.
-            if (
+            is_prefill_batch = (
                 forward_batch.forward_mode.is_extend_without_speculative()
+            )
+
+            if (
+                is_prefill_batch
                 and (not _is_sm120 or _dsv4_triton_sparse_prefill)
                 and (
                     q.shape[0] > _LARGE_INDEXER_QUERY_THRESHOLD
@@ -1755,7 +1759,9 @@ class DeepseekV4AttnBackend(
                     attn_sink=attn_sink,
                 )
 
-            if _is_sm120 and _dsv4_triton_decode:
+            # A prefill batch that failed the guard above must not land here; on
+            # SM120 that guard is all that separates the two branches.
+            if _is_sm120 and _dsv4_triton_decode and not is_prefill_batch:
                 # The Triton sparse-MLA kernel reads the two paged fp8 pools
                 # directly, so decode needs no dequantised workspace and no head
                 # padding. Split-K fills the device at small batch, where one
