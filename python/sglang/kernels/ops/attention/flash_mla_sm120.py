@@ -368,7 +368,6 @@ _BYTES_PER_DST_PAGE_PADDED = math.ceil(_BYTES_PER_DST_PAGE / 576) * 576  # 37440
 def _page_split_kernel(
     src_ptr,
     dst_ptr,
-    ref_mask_ptr,
     N_pages,
     src_stride0: tl.constexpr,
     dst_stride0: tl.constexpr,
