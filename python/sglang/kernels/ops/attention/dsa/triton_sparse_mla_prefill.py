@@ -1212,7 +1212,7 @@ def _dense_prefix_path(
     if dense_config is not None:
         bm, bn, warps, stages = dense_config
     else:
-        _cap = torch.cuda.get_device_capability()
+        _cap = torch.cuda.get_device_capability(q.device)
         # SM90: 228KB smem; SM120: 99KB -> smaller tiles (validated on-box 2026-07-22)
         bm, bn, warps, stages = (32, 64, 4, 2) if _cap[0] == 9 else (16, 32, 8, 2)
     _dense_prefix_kernel[(triton.cdiv(P, bm), h)](
@@ -1388,6 +1388,9 @@ def _nsa_prefill_union_kernel(
     )
 
 
+_SMEM_STEPDOWN_SEEN = set()
+
+
 def _union_path(
     q, kv, indices, sm_scale, d_v, out, G, union_config=None, attn_sink=None
 ):
@@ -1461,12 +1464,24 @@ def _union_path(
     if union_config is not None:
         bn, warps, stages = union_config
     elif torch.cuda.get_device_capability(q.device)[0] >= 12:
-        # SM120 on-box sweeps: G=2 winner (64,4,3) 5.21 vs 5.50; G=4 winner (32,4,2)
-        # 3.605 ms on real indices (BN=64 OORs >=115KB with the GH=32 Q tile; BN=32
-        # restores the fit and the M=32 x N=32 tile beats every neighbor by >=12%).
-        bn, warps, stages = (64, 4, 3) if G == 2 else (32, 4, 2)
+        # SM120 on-box sweeps: GH=16 winner (64,4,3) 5.21 vs 5.50; GH=32 winner
+        # (32,4,2) 3.605 ms on real indices.
+        #
+        # Keyed on G*h because the constraint is the tile and the tile is GH.
+        # Keying on G alone reads as "G=2 wants the big BN", which holds only
+        # while h is 8. At h=16 (TP=4 without DP attention) G=2 is GH=32, which
+        # needs 102,400 B against SM120's 101,376 B: the step-down below keeps
+        # it running, but measured against the per-token path it costs 2.1x
+        # (0.460x, vs 0.970x for the (32,4,2) that GH=32 actually wants) because
+        # the ladder moves BLOCK_N and num_stages but never num_warps.
+        # h=8 selects exactly what it selected before, on both arrival paths.
+        bn, warps, stages = (64, 4, 3) if G * h <= 16 else (32, 4, 2)
     else:
-        bn, warps, stages = (64, 4, 2) if G == 4 else (64, 8, 2)
+        # Same G-vs-G*h reasoning. SM90 has 232,448 B, so GH=32 at BN=64 fits
+        # and there is no step-down -- the cost is pure mistuning (8 warps is a
+        # GH=16 config). Measured on H20-3e at h=16: 0.714x before, 0.867x
+        # after; h=8 unchanged on both arrival paths.
+        bn, warps, stages = (64, 8, 2) if G * h <= 16 else (64, 4, 2)
     # The union Q tile is H*G rows, so its shared-memory footprint grows with
     # the head count: 16 heads at G=2 already exceeds SM120's 100 KB with the
     # tuned tile. Step down as the per-token launcher does rather than failing
@@ -1493,6 +1508,19 @@ def _union_path(
                 num_stages=ns_try,
                 HAS_SINK=attn_sink is not None,
             )
+            if (bn_try, ns_try) != (bn, stages):
+                # Survivable but not free: before the G*h keying above was
+                # corrected this path cost 2.1x. Say so once per shape rather
+                # than degrading silently.
+                sig = (G, h, d_qk, bn, stages, bn_try, ns_try)
+                if sig not in _SMEM_STEPDOWN_SEEN:
+                    _SMEM_STEPDOWN_SEEN.add(sig)
+                    logger.warning(
+                        "sparse_mla union: tuned tile (BLOCK_N=%d, num_stages="
+                        "%d) does not fit at G=%d H=%d d_qk=%d; stepped down to "
+                        "(BLOCK_N=%d, num_stages=%d)",
+                        bn, stages, G, h, d_qk, bn_try, ns_try,
+                    )
             break
         except triton.runtime.errors.OutOfResources:
             continue
@@ -1681,8 +1709,12 @@ def _smem_fallbacks(bn, stages):
     for cand in (
         (bn, stages),
         (bn, 2),
-        (bn // 2, stages),
+        # 2 before `stages`: a halved BLOCK_N has less to overlap, so carrying
+        # the wide tile's pipeline depth costs more than it hides. Measured at
+        # GH=32 -- SM120 (32,4,2) 0.970x vs (32,4,3) 0.889x; H20 (64,4,2) 0.867x
+        # vs (64,4,3) 0.826x -- and every tile pair measured so far agrees.
         (bn // 2, 2),
+        (bn // 2, stages),
         (bn // 4, 2),
         (16, 2),
         (bn // 2, 1),
