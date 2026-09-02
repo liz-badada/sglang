@@ -1212,7 +1212,7 @@ def _dense_prefix_path(
     if dense_config is not None:
         bm, bn, warps, stages = dense_config
     else:
-        _cap = torch.cuda.get_device_capability()
+        _cap = torch.cuda.get_device_capability(q.device)
         # SM90: 228KB smem; SM120: 99KB -> smaller tiles (validated on-box 2026-07-22)
         bm, bn, warps, stages = (32, 64, 4, 2) if _cap[0] == 9 else (16, 32, 8, 2)
     _dense_prefix_kernel[(triton.cdiv(P, bm), h)](
@@ -1388,8 +1388,31 @@ def _nsa_prefill_union_kernel(
     )
 
 
+# The union path is exact but not always profitable: G adjacent tokens share
+# one gathered index set, so it wins when their sets overlap and loses when they
+# do not. `G * sum|U| / sum L` is that overlap, and it is an identity with
+# `G / E[popcount]` -- compact already produces |U|, so measuring it needs no
+# extra pass. Above the threshold the path is declined and the caller falls
+# through to the per-token kernel, which gives an all-or-nothing switch a floor:
+# on SM120, adversarial indices go from 0.577-0.629x of the per-token path to
+# 0.977-0.988x, while real indices stay at 1.25-1.31x -- a kept call pays
+# nothing, because the ratio is read after compact, whose output it needs anyway.
+#
+# 1.9 is the measured (G=4, H=8) optimum on SM120. It is a tuning constant, not
+# a bound; 0 disables the gate.
+_UNION_GATE = 1.9
+# Re-measuring every call costs 2.4-6% of a kept call in host sync, so the
+# verdict is cached and refreshed every N calls. `h` is in the key because the
+# break-even depends on the head count.
+_UNION_GATE_EVERY = 16
+_UNION_GATE_CACHE = {}
+_LAST_UNION_RATIO = float("nan")  # last measured ratio, for tests and tuning
+_SMEM_STEPDOWN_SEEN = set()
+
+
 def _union_path(
-    q, kv, indices, sm_scale, d_v, out, G, union_config=None, attn_sink=None
+    q, kv, indices, sm_scale, d_v, out, G, union_config=None, attn_sink=None,
+    topk_length=None, union_gate=None,
 ):
     """Returns True if handled. Budget-gated; tail rows (T % G) fall back."""
     T, h, d_qk = q.shape
@@ -1401,6 +1424,17 @@ def _union_path(
     T_main = (T // G) * G
     if T_main == 0:
         return False
+    if union_gate is None:
+        union_gate = _UNION_GATE
+    gate_key = (G, K, h, q.device)
+    fresh = True
+    if union_gate:
+        seen, decision = _UNION_GATE_CACHE.get(gate_key, (0, None))
+        if decision is not None and seen % max(1, _UNION_GATE_EVERY):
+            _UNION_GATE_CACHE[gate_key] = (seen + 1, decision)
+            if not decision:
+                return False
+            fresh = False  # cached keep: skip the re-measure after compact
     # single fused reduction + ONE host sync (amax is -1-safe; amin masks -1 to INT_MAX)
     vmin_t = torch.where(
         indices >= 0,
@@ -1458,15 +1492,46 @@ def _union_path(
         STAGES=4,
         num_warps=4,
     )
+    if union_gate and fresh:
+        # After compact, so a kept call pays nothing extra. Deciding earlier
+        # from a strided sample was built and measured first and is worse: it
+        # lifts the declining case from 0.843-0.919x to 0.918-0.919x but taxes
+        # every kept call 3.2-9.5%, and real captured indices never decline.
+        if topk_length is not None:
+            l_sum = topk_length[:T_main].to(torch.int64).sum()
+        else:  # no real length: the row width errs toward keeping
+            l_sum = torch.tensor(T_main * K, dtype=torch.int64, device=q.device)
+        u_tot, l_tot = torch.stack(
+            [ulen.to(torch.int64).sum(), l_sum]
+        ).tolist()
+        global _LAST_UNION_RATIO
+        _LAST_UNION_RATIO = (G * u_tot / l_tot) if l_tot else float("inf")
+        decision = _LAST_UNION_RATIO < union_gate
+        _UNION_GATE_CACHE[gate_key] = (seen + 1, decision)
+        if not decision:
+            return False  # caller falls through to the per-token path
+
     if union_config is not None:
         bn, warps, stages = union_config
     elif torch.cuda.get_device_capability(q.device)[0] >= 12:
-        # SM120 on-box sweeps: G=2 winner (64,4,3) 5.21 vs 5.50; G=4 winner (32,4,2)
-        # 3.605 ms on real indices (BN=64 OORs >=115KB with the GH=32 Q tile; BN=32
-        # restores the fit and the M=32 x N=32 tile beats every neighbor by >=12%).
-        bn, warps, stages = (64, 4, 3) if G == 2 else (32, 4, 2)
+        # SM120 on-box sweeps: GH=16 winner (64,4,3) 5.21 vs 5.50; GH=32 winner
+        # (32,4,2) 3.605 ms on real indices.
+        #
+        # Keyed on G*h because the constraint is the tile and the tile is GH.
+        # Keying on G alone reads as "G=2 wants the big BN", which holds only
+        # while h is 8. At h=16 (TP=4 without DP attention) G=2 is GH=32, which
+        # needs 102,400 B against SM120's 101,376 B: the step-down below keeps
+        # it running, but measured against the per-token path it costs 2.1x
+        # (0.460x, vs 0.970x for the (32,4,2) that GH=32 actually wants) because
+        # the ladder moves BLOCK_N and num_stages but never num_warps.
+        # h=8 selects exactly what it selected before, on both arrival paths.
+        bn, warps, stages = (64, 4, 3) if G * h <= 16 else (32, 4, 2)
     else:
-        bn, warps, stages = (64, 4, 2) if G == 4 else (64, 8, 2)
+        # Same G-vs-G*h reasoning. SM90 has 232,448 B, so GH=32 at BN=64 fits
+        # and there is no step-down -- the cost is pure mistuning (8 warps is a
+        # GH=16 config). Measured on H20-3e at h=16: 0.714x before, 0.867x
+        # after; h=8 unchanged on both arrival paths.
+        bn, warps, stages = (64, 8, 2) if G * h <= 16 else (64, 4, 2)
     # The union Q tile is H*G rows, so its shared-memory footprint grows with
     # the head count: 16 heads at G=2 already exceeds SM120's 100 KB with the
     # tuned tile. Step down as the per-token launcher does rather than failing
@@ -1493,6 +1558,19 @@ def _union_path(
                 num_stages=ns_try,
                 HAS_SINK=attn_sink is not None,
             )
+            if (bn_try, ns_try) != (bn, stages):
+                # Survivable but not free: before the G*h keying above was
+                # corrected this path cost 2.1x. Say so once per shape rather
+                # than degrading silently.
+                sig = (G, h, d_qk, bn, stages, bn_try, ns_try)
+                if sig not in _SMEM_STEPDOWN_SEEN:
+                    _SMEM_STEPDOWN_SEEN.add(sig)
+                    logger.warning(
+                        "sparse_mla union: tuned tile (BLOCK_N=%d, num_stages="
+                        "%d) does not fit at G=%d H=%d d_qk=%d; stepped down to "
+                        "(BLOCK_N=%d, num_stages=%d)",
+                        bn, stages, G, h, d_qk, bn_try, ns_try,
+                    )
             break
         except triton.runtime.errors.OutOfResources:
             continue
@@ -1681,8 +1759,12 @@ def _smem_fallbacks(bn, stages):
     for cand in (
         (bn, stages),
         (bn, 2),
-        (bn // 2, stages),
+        # 2 before `stages`: a halved BLOCK_N has less to overlap, so carrying
+        # the wide tile's pipeline depth costs more than it hides. Measured at
+        # GH=32 -- SM120 (32,4,2) 0.970x vs (32,4,3) 0.889x; H20 (64,4,2) 0.867x
+        # vs (64,4,3) 0.826x -- and every tile pair measured so far agrees.
         (bn // 2, 2),
+        (bn // 2, stages),
         (bn // 4, 2),
         (16, 2),
         (bn // 2, 1),
@@ -1809,7 +1891,8 @@ def sparse_mla_prefill(
             return out
 
     if union in (2, 4) and _union_path(
-        q, kv, indices, sm_scale, d_v, out, union, union_config, attn_sink=attn_sink
+        q, kv, indices, sm_scale, d_v, out, union, union_config,
+        attn_sink=attn_sink, topk_length=topk_length,
     ):
         return out
 
