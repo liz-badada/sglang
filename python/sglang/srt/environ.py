@@ -1313,6 +1313,13 @@ class Envs:
     SGLANG_DSV4_FP4_EXPERTS = EnvBool(True)
     # Set True to dequantize the FP4 experts to FP8 at runtime
     SGLANG_DSV4_FP4_DEQUANT = EnvBool(False)
+    # Stream routed-expert layers from pinned host memory through two GPU
+    # buffers. This is restricted to disaggregated TP1/EP1 SM120 prefill.
+    SGLANG_FREETOKEN_PREFILL_OFFLOAD = EnvBool(False)
+    # Delay admission until enough uncached input tokens can amortize a complete
+    # expert-weight sweep. A zero target or timeout disables coalescing.
+    SGLANG_FREETOKEN_PREFILL_TARGET_TOKENS = EnvInt(0)
+    SGLANG_FREETOKEN_PREFILL_MAX_WAIT_MS = EnvFloat(0.0)
     # Flash-0731 also accepts "low"; the active profile is checkpoint-resolved.
     SGLANG_DSV4_REASONING_EFFORT = EnvStr("")
     # Quantize the SWA fp8 KV cache from bf16-rounded values (matches

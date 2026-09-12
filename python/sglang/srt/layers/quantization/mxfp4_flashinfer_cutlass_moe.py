@@ -14,6 +14,10 @@ import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
+from sglang.srt.environ import envs
+from sglang.srt.layers.moe.freetoken_prefill_offload import (
+    get_freetoken_prefill_offload_manager,
+)
 from sglang.srt.utils import is_flashinfer_available, log_info_on_rank0
 from sglang.srt.utils.common import is_sm120_supported
 
@@ -36,10 +40,32 @@ class Mxfp4FlashinferCutlassMoEMethod:
         if not is_flashinfer_available():
             raise RuntimeError("Mxfp4FlashinferCutlassMoEMethod requires FlashInfer.")
         self._use_mxfp8_act_scaling = is_sm120_supported()
+        self._freetoken_offload = envs.SGLANG_FREETOKEN_PREFILL_OFFLOAD.get()
         self._fp8 = fp8_method
         self.prefix = prefix
         self._swiglu_limit_tensor: torch.Tensor | None = None
         self._mxfp4_weight_global_scale_tensor: torch.Tensor | None = None
+        if self._freetoken_offload:
+            self._validate_prefill_offload()
+
+    def _validate_prefill_offload(self) -> None:
+        from sglang.srt.model_executor.cuda_graph_config import Backend
+        from sglang.srt.runtime_context import get_parallel, get_server_args
+
+        parallel = get_parallel()
+        server_args = get_server_args()
+        if not (
+            self._use_mxfp8_act_scaling
+            and parallel.tp_size == parallel.moe_ep_size == server_args.dp_size == 1
+            and server_args.disaggregation_mode == "prefill"
+            and server_args.cuda_graph_config.prefill.backend == Backend.DISABLED
+            and not server_args.enable_two_batch_overlap
+            and not server_args.enable_single_batch_overlap
+        ):
+            raise ValueError(
+                "FreeToken offload requires SM120 disaggregated TP1/EP1/DP1 "
+                "prefill without CUDA graph or batch overlap"
+            )
 
     @property
     def load_up_proj_weight_first(self) -> bool:
@@ -63,6 +89,18 @@ class Mxfp4FlashinferCutlassMoEMethod:
                 f"(got hidden={hidden_size}, "
                 f"intermediate={intermediate_size_per_partition})."
             )
+        if self._freetoken_offload:
+            get_freetoken_prefill_offload_manager().create_weights(
+                self._fp8,
+                layer,
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                params_dtype,
+                **extra_weight_attrs,
+            )
+            return
+
         # Keep checkpoint scales in native E8M0 instead of staging them as FP32.
         self._fp8.create_weights(
             layer,
@@ -81,7 +119,7 @@ class Mxfp4FlashinferCutlassMoEMethod:
         self.moe_runner_config = moe_runner_config
 
         E = layer.num_local_experts
-        device = layer.w13_weight.device
+        device = "cuda" if self._freetoken_offload else layer.w13_weight.device
         if self._use_mxfp8_act_scaling:
             # FlashInfer's MXFP4 ABI requires a neutral per-expert global scale.
             self._mxfp4_weight_global_scale_tensor = torch.ones(
@@ -108,6 +146,8 @@ class Mxfp4FlashinferCutlassMoEMethod:
         self._fp8.process_weights_after_loading(layer)
 
         if getattr(layer, "_mega_moe_weights_built", False):
+            if self._freetoken_offload:
+                raise ValueError("FreeToken offload is incompatible with MegaMoE")
             return
 
         arch = "SM120" if self._use_mxfp8_act_scaling else "SM90"
@@ -166,6 +206,8 @@ class Mxfp4FlashinferCutlassMoEMethod:
             if self._use_mxfp8_act_scaling
             else "flashinfer_cutlass_sm90"
         )
+        if self._freetoken_offload:
+            get_freetoken_prefill_offload_manager().initialize_staging(layer.layer_id)
         # SM90 creates full-size interleaved copies; release old layouts per layer.
         if not self._use_mxfp8_act_scaling:
             torch.cuda.empty_cache()
@@ -179,21 +221,33 @@ class Mxfp4FlashinferCutlassMoEMethod:
             FlashInferCutlassMxfp4MoeQuantInfo,
         )
 
-        quant_info = FlashInferCutlassMxfp4MoeQuantInfo(
-            w13_weight=layer.w13_weight,
-            w2_weight=layer.w2_weight,
-            w13_weight_scale=layer.w13_weight_scale_inv,
-            w2_weight_scale=layer.w2_weight_scale_inv,
-            mxfp4_weight_global_scale=self._mxfp4_weight_global_scale_tensor,
-            w13_bias=None,
-            w2_bias=None,
-            swiglu_alpha=None,
-            swiglu_beta=None,
-            swiglu_limit=self._swiglu_limit_tensor,
-            moe_tp_size=layer.moe_tp_size,
-            moe_tp_rank=layer.moe_tp_rank,
-            moe_ep_size=layer.moe_ep_size,
-            moe_ep_rank=layer.moe_ep_rank,
-            padded_hidden=None,
-        )
-        return self.runner.run(dispatch_output, quant_info)
+        manager = None
+        if self._freetoken_offload:
+            manager = get_freetoken_prefill_offload_manager()
+            w13, w13_scale, w2, w2_scale = manager.acquire(layer.layer_id)
+        else:
+            w13, w13_scale = layer.w13_weight, layer.w13_weight_scale_inv
+            w2, w2_scale = layer.w2_weight, layer.w2_weight_scale_inv
+
+        try:
+            quant_info = FlashInferCutlassMxfp4MoeQuantInfo(
+                w13_weight=w13,
+                w2_weight=w2,
+                w13_weight_scale=w13_scale,
+                w2_weight_scale=w2_scale,
+                mxfp4_weight_global_scale=self._mxfp4_weight_global_scale_tensor,
+                w13_bias=None,
+                w2_bias=None,
+                swiglu_alpha=None,
+                swiglu_beta=None,
+                swiglu_limit=self._swiglu_limit_tensor,
+                moe_tp_size=layer.moe_tp_size,
+                moe_tp_rank=layer.moe_tp_rank,
+                moe_ep_size=layer.moe_ep_size,
+                moe_ep_rank=layer.moe_ep_rank,
+                padded_hidden=None,
+            )
+            return self.runner.run(dispatch_output, quant_info)
+        finally:
+            if manager is not None:
+                manager.release(layer.layer_id)
