@@ -11,6 +11,7 @@ from sglang.srt.distributed.naive_distributed import (
     get_naive_distributed,
     set_naive_distributed,
 )
+from sglang.srt.environ import envs
 from sglang.srt.layers.parameter import ModelWeightParameter
 from sglang.srt.runtime_context import (
     get_exec,
@@ -66,8 +67,38 @@ def set_offloader(instance: BaseOffloader):
     _instance = instance
 
 
+def _validate_freetoken_prefill_offload(server_args: ServerArgs):
+    from sglang.srt.model_executor.cuda_graph_config import Backend
+    from sglang.srt.utils.common import is_sm120_supported
+
+    parallel = get_parallel()
+    if not is_sm120_supported():
+        raise ValueError("FreeToken prefill offload currently requires SM120")
+    if not (
+        server_args.disaggregation_mode == "prefill"
+        and parallel.tp_size == 1
+        and parallel.moe_ep_size == 1
+        and parallel.dp_size == 1
+        and server_args.cuda_graph_config.prefill.backend == Backend.DISABLED
+        and not server_args.enable_two_batch_overlap
+        and not server_args.enable_single_batch_overlap
+    ):
+        raise ValueError(
+            "FreeToken prefill offload requires a disaggregated TP1/EP1/DP1 "
+            "prefill worker without prefill CUDA graph or batch overlap"
+        )
+
+
 def create_offloader_from_server_args(server_args: ServerArgs, dp_rank: int):
+    freetoken_offload = envs.SGLANG_FREETOKEN_PREFILL_OFFLOAD.get()
+    if freetoken_offload:
+        _validate_freetoken_prefill_offload(server_args)
+
     if get_exec().offload.cpu_offload_gb > 0:
+        if freetoken_offload:
+            raise ValueError(
+                "FreeToken prefill offload does not use --cpu-offload-gb"
+            )
         return OffloaderV1(
             cpu_offload_max_bytes=int(get_exec().offload.cpu_offload_gb * 1024**3)
         )
@@ -82,6 +113,12 @@ def create_offloader_from_server_args(server_args: ServerArgs, dp_rank: int):
             mode=get_exec().offload.offload_mode,
             dp_rank=dp_rank,
             dp_size=get_parallel().dp_size,
+            prefetch_before_forward=freetoken_offload,
+        )
+    if freetoken_offload:
+        raise ValueError(
+            "FreeToken prefill offload requires --offload-group-size 1, "
+            "--offload-num-in-group 1, and --offload-prefetch-step 1"
         )
     return NoopOffloader()
 
@@ -164,11 +201,24 @@ class OffloaderV2(BaseOffloader):
         mode: str,
         dp_rank: int,
         dp_size: int,
+        prefetch_before_forward: bool = False,
     ):
         self.group_size = group_size
         self.num_in_group = num_in_group
         self.prefetch_step = prefetch_step
         self.mode = mode
+        self.prefetch_before_forward = prefetch_before_forward
+
+        if self.prefetch_before_forward and (
+            self.mode != "cpu"
+            or self.group_size != 1
+            or self.num_in_group != 1
+            or self.prefetch_step != 1
+        ):
+            raise ValueError(
+                "FreeToken prefetch requires CPU offload with "
+                "group_size=num_in_group=prefetch_step=1"
+            )
 
         run_id = os.environ["SGLANG_RUN_ID"]
 
@@ -225,8 +275,13 @@ class OffloaderV2(BaseOffloader):
                     )
                 )
 
+        hook = (
+            _hook_module_forward_for_offloader_before_forward
+            if self.prefetch_before_forward
+            else _hook_module_forward_for_offloader
+        )
         for index, module in enumerate(offload_submodules):
-            _hook_module_forward_for_offloader(
+            hook(
                 index=index,
                 module=module,
                 offloaders=self.offloaders,
@@ -261,17 +316,45 @@ def _hook_module_forward_for_offloader(index, module, offloaders, prefetch_step)
     )
 
 
+def _hook_module_forward_for_offloader_before_forward(
+    index, module, offloaders, prefetch_step
+):
+    next_index = (index + prefetch_step) % len(offloaders)
+
+    def _get_parameter_and_buffer_dicts():
+        tensors = offloaders[index].wait_and_get_device_tensors()
+        # FreeToken queues layer L+1 before functional_call launches layer L,
+        # allowing its H2D copy to overlap the current MoE computation.
+        if index + prefetch_step < len(offloaders):
+            offloaders[next_index].start_onload()
+        return tensors
+
+    def _on_forward_end():
+        if index + prefetch_step >= len(offloaders):
+            offloaders[next_index].start_onload()
+        offloaders[index].offload()
+
+    _hook_module_forward_raw(
+        module,
+        on_forward_end=_on_forward_end,
+        get_parameter_and_buffer_dicts=_get_parameter_and_buffer_dicts,
+    )
+
+
 def _hook_module_forward_raw(module, on_forward_end, get_parameter_and_buffer_dicts):
     original_forward = module.forward
 
     def forward(*args, **kwargs):
         module.forward = original_forward
-        output = functional_call(
-            module, get_parameter_and_buffer_dicts(), args=args, kwargs=kwargs
-        )
-        on_forward_end()
-        module.forward = forward
-        return output
+        try:
+            return functional_call(
+                module, get_parameter_and_buffer_dicts(), args=args, kwargs=kwargs
+            )
+        finally:
+            try:
+                on_forward_end()
+            finally:
+                module.forward = forward
 
     module.forward = forward
 

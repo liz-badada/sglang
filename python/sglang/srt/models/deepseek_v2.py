@@ -2602,6 +2602,34 @@ class DeepseekV2DecoderLayer(nn.Module):
         return output
 
 
+def make_deepseek_moe_offloader_kwargs():
+    """Describe the routed-expert state consumed by the generic offloader."""
+    return dict(
+        submodule_accessor=lambda layer: (
+            layer.mlp.experts
+            if isinstance(layer.mlp, DeepseekV2MoE)
+            else layer.mlp
+        ),
+        whitelist_param_names_creator=lambda module: (
+            [
+                "w13_weight",
+                "w2_weight",
+                # NVFP4 runners consume these repacked scales directly.
+                *(
+                    [
+                        "w13_blockscale_swizzled",
+                        "w2_blockscale_swizzled",
+                    ]
+                    if hasattr(module, "w13_blockscale_swizzled")
+                    else []
+                ),
+            ]
+            if isinstance(module, FusedMoE)
+            else []
+        ),
+    )
+
+
 class DeepseekV2Model(nn.Module):
     fall_back_to_pt_during_load = False
 
@@ -2661,30 +2689,7 @@ class DeepseekV2Model(nn.Module):
             pp_rank=self.pp_group.rank_in_group,
             pp_size=self.pp_group.world_size,
             prefix=add_prefix("layers", prefix),
-            offloader_kwargs=dict(
-                submodule_accessor=lambda layer: (
-                    layer.mlp.experts
-                    if isinstance(layer.mlp, DeepseekV2MoE)
-                    else layer.mlp
-                ),
-                whitelist_param_names_creator=lambda module: (
-                    [
-                        "w13_weight",
-                        "w2_weight",
-                        # only for nvfp4
-                        *(
-                            [
-                                "w13_blockscale_swizzled",
-                                "w2_blockscale_swizzled",
-                            ]
-                            if hasattr(module, "w13_blockscale_swizzled")
-                            else []
-                        ),
-                    ]
-                    if isinstance(module, FusedMoE)
-                    else []
-                ),
-            ),
+            offloader_kwargs=make_deepseek_moe_offloader_kwargs(),
         )
 
         local_layer_ids = list(range(self.start_layer, self.end_layer))

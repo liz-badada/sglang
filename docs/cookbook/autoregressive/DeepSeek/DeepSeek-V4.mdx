@@ -217,6 +217,30 @@ routes it as one extra MXFP4 expert through the same trtllm-gen MoE kernel, so t
 
 Only for deployments without expert parallelism (e.g. the single-node low-latency recipes): with `moe_ep_size > 1` the flag is rejected at startup, unless the DeepEP/MegaMOE per-rank shared-slot path is in use.
 
+**FreeToken prefill expert offload (experimental, SM120)**
+
+FreeToken keeps DeepSeek-V4-Flash experts in pinned host memory and overlaps the
+next layer's H2D copy with the current MoE on an SM120 GPU. It is disabled by
+default and requires a disaggregated TP1/EP1/DP1 prefill worker with prefill
+CUDA graphs and batch overlap disabled. Streaming is implemented at the common
+`FusedMoE` offloader boundary instead of inside a MoE runner. It has been
+validated with `deep_gemm` and `flashinfer_mxfp4`; both consume the same staged
+parameters.
+
+```bash Command
+SGLANG_FREETOKEN_PREFILL_OFFLOAD=1 \
+SGLANG_FREETOKEN_PREFILL_TARGET_TOKENS=32768 \
+SGLANG_FREETOKEN_PREFILL_MAX_WAIT_MS=1000 \
+sglang serve <prefill arguments> \
+  --offload-group-size 1 \
+  --offload-num-in-group 1 \
+  --offload-prefetch-step 1 \
+  --offload-mode cpu
+```
+
+The target amortizes a weight sweep; the timeout bounds low-load waiting. Set
+either admission value to zero to retain offload without admission coalescing.
+
 **Compressed attention state dtype**
 
 DeepSeek-V4 uses hybrid compressed attention for long-context efficiency. `SGLANG_DSV4_COMPRESS_STATE_DTYPE` controls the dtype of the C4 / C128 compressed attention state pools. Supported values are `float32` / `fp32` (default: `float32`) and `bfloat16` / `bf16`. For BF16 on the offline compression path:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from array import array
 from collections import deque
 from http import HTTPStatus
@@ -538,6 +539,68 @@ class SchedulerDisaggregationPrefillMixin:
             for req in self.waiting_queue
         )
 
+    def maybe_delay_freetoken_prefill(self: Scheduler) -> bool:
+        """Return true while collecting enough tokens for one weight sweep."""
+        target = envs.SGLANG_FREETOKEN_PREFILL_TARGET_TOKENS.get()
+        max_wait_ms = envs.SGLANG_FREETOKEN_PREFILL_MAX_WAIT_MS.get()
+        if not (
+            envs.SGLANG_FREETOKEN_PREFILL_OFFLOAD.get()
+            and target > 0
+            and max_wait_ms > 0
+            and self.chunked_req is None
+        ):
+            self._freetoken_wait_started_at = None
+            return False
+
+        ready = [
+            req
+            for req in self.waiting_queue
+            if not req.pending_bootstrap and not is_aborted(req)
+        ]
+        if not ready:
+            self._freetoken_wait_started_at = None
+            return False
+
+        def request_tokens(req: Req) -> int:
+            uncached = max(
+                0,
+                len(req.origin_input_ids)
+                + len(req.output_ids)
+                - len(req.prefix_indices),
+            )
+            return -(-uncached // self.page_size) * self.page_size
+
+        # PrefillAdder stops at the first whole request that does not fit. Keep
+        # the oldest ready request first, then greedily fill the remaining gap.
+        capacity = self.max_prefill_tokens - self.page_size
+        selected = [ready[0]]
+        selected_tokens = request_tokens(ready[0])
+        max_requests = self.max_running_requests or len(ready)
+        for req in sorted(ready[1:], key=request_tokens, reverse=True):
+            tokens = request_tokens(req)
+            if len(selected) >= max_requests:
+                break
+            if selected_tokens + tokens <= capacity:
+                selected.append(req)
+                selected_tokens += tokens
+
+        now = time.monotonic()
+        started_at = getattr(self, "_freetoken_wait_started_at", None)
+        if started_at is None:
+            started_at = self._freetoken_wait_started_at = now
+        if (
+            selected_tokens < min(target, capacity)
+            and (now - started_at) * 1000 < max_wait_ms
+        ):
+            return True
+
+        selected_ids = {id(req) for req in selected}
+        self.waiting_queue = selected + [
+            req for req in self.waiting_queue if id(req) not in selected_ids
+        ]
+        self._freetoken_wait_started_at = None
+        return False
+
     @scheduler_nvtx_method("scheduler.get_next_batch_to_run")
     def get_next_disagg_prefill_batch_to_run(
         self: Scheduler,
@@ -553,6 +616,9 @@ class SchedulerDisaggregationPrefillMixin:
         self.resolve_waiting_queue_bootstrap()
 
         self.process_prefill_chunk(last_batch=last_batch, running_batch=running_batch)
+
+        if self.maybe_delay_freetoken_prefill():
+            return NextBatchPlan(batch_to_run=None, running_batch=running_batch)
 
         prefill_plan = self.get_new_batch_prefill(running_batch)
         batch = prefill_plan.batch_to_run
