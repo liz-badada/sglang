@@ -404,7 +404,24 @@ class MiMoV2MoE(nn.Module):
             is_nextn=is_nextn,
         )
 
-        experts_type = get_moe_impl_class(quant_config)
+        # Some mixed-quant checkpoints serialize experts as MXFP4 while
+        # attention remains block-FP8. Select the expert quantization config
+        # from the checkpoint storage type so parameter names and shapes match.
+        moe_quant_config = quant_config
+        checkpoint_quant_config = getattr(config, "quantization_config", None)
+        checkpoint_store_dtype = None
+        if checkpoint_quant_config is not None:
+            checkpoint_store_dtype = (
+                checkpoint_quant_config.get("store_dtype")
+                if isinstance(checkpoint_quant_config, dict)
+                else getattr(checkpoint_quant_config, "store_dtype", None)
+            )
+        if checkpoint_store_dtype == "mxfp4":
+            from sglang.srt.layers.quantization.mxfp4 import Mxfp4Config
+            moe_quant_config = Mxfp4Config(is_checkpoint_mxfp4_serialized=True)
+            if self.layer_id == 0:
+                logger.info("MXFP4 expert checkpoint detected; using Mxfp4Config")
+        experts_type = get_moe_impl_class(moe_quant_config)
         self.experts = experts_type(
             num_experts=config.n_routed_experts
             + get_exec().moe.ep_num_redundant_experts,
@@ -412,7 +429,7 @@ class MiMoV2MoE(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             layer_id=self.layer_id,
-            quant_config=quant_config,
+            quant_config=moe_quant_config,
             routed_scaling_factor=1.0,
             prefix=add_prefix("experts", prefix),
         )
@@ -425,12 +442,12 @@ class MiMoV2MoE(nn.Module):
             topk_group=config.topk_group,
             correction_bias=self.gate.e_score_correction_bias,
             scoring_func=config.scoring_func,
-            quant_config=quant_config,
+            quant_config=moe_quant_config,
             routed_scaling_factor=1.0,
             apply_routed_scaling_factor_on_output=self.experts.should_fuse_routed_scaling_factor_in_topk,
             # Some Fp4 MoE backends require the output format to be bypassed but the MTP layers are unquantized
             # and requires the output format to be standard. We use quant_config to determine the output format.
-            output_format=TopKOutputFormat.STANDARD if quant_config is None else None,
+            output_format=TopKOutputFormat.STANDARD if moe_quant_config is None else None,
         )
 
         # todo : implement tbo forward needed
@@ -483,7 +500,10 @@ class MiMoV2MoE(nn.Module):
 
         if hidden_states.shape[0] > 0:
             router_logits = self.gate(hidden_states)
-            topk_output = self.topk(hidden_states, router_logits)
+            with get_global_expert_distribution_recorder().with_current_layer(
+                self.layer_id
+            ):
+                topk_output = self.topk(hidden_states, router_logits)
         else:
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
@@ -994,6 +1014,10 @@ class MiMoV2Model(nn.Module):
         self.padding_idx = getattr(config, "pad_token_id", None)
         self.vocab_size = config.vocab_size
         self.pp_group = get_pp_group()
+        # DFLASH/EAGLE3-style aux hidden state capture: layer indices (1-indexed,
+        # post-layer-output) to stash during forward(). Empty by default -- a no-op
+        # unless set_dflash_layers_to_capture()/set_eagle3_layers_to_capture() is called.
+        self.layers_to_capture = []
 
         if self.pp_group.is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1065,6 +1089,7 @@ class MiMoV2Model(nn.Module):
                 )
                 tbo_start_layer = tbo_start_layer + 1
 
+            aux_hidden_states = []
             hidden_states, residual = model_forward_maybe_tbo(
                 layers=self.layers[tbo_start_layer:tbo_end_layer],
                 enable_tbo=True,
@@ -1081,6 +1106,7 @@ class MiMoV2Model(nn.Module):
                 residual=residual,
             )
         else:
+            aux_hidden_states = []
             for i in range(self.start_layer, self.end_layer):
                 layer = self.layers[i]
                 hidden_states, residual = layer(
@@ -1089,6 +1115,12 @@ class MiMoV2Model(nn.Module):
                     forward_batch,
                     residual,
                 )
+                if i in self.layers_to_capture:
+                    aux_hidden_states.append(
+                        hidden_states + residual
+                        if residual is not None
+                        else hidden_states
+                    )
 
         hidden_states_before_norm = None
         if not self.pp_group.is_last_rank:
@@ -1109,7 +1141,9 @@ class MiMoV2Model(nn.Module):
                 else:
                     hidden_states, _ = self.norm(hidden_states, residual)
 
-        return hidden_states, hidden_states_before_norm
+        if len(aux_hidden_states) == 0:
+            aux_hidden_states = None
+        return hidden_states, hidden_states_before_norm, aux_hidden_states
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should
@@ -1353,6 +1387,7 @@ class MiMoV2ForCausalLM(nn.Module, AudioEncoderMixin):
             "forward() should not be called in encoder_only mode"
         )
 
+        aux_hidden_states = None
         if self._is_multimodal:
             hidden_states, hidden_states_before_norm = general_mm_embed_routine(
                 input_ids=input_ids,
@@ -1363,7 +1398,7 @@ class MiMoV2ForCausalLM(nn.Module, AudioEncoderMixin):
                 pp_proxy_tensors=pp_proxy_tensors,
             )
         else:
-            hidden_states, hidden_states_before_norm = self.model(
+            hidden_states, hidden_states_before_norm, aux_hidden_states = self.model(
                 input_ids,
                 positions,
                 forward_batch,
@@ -1378,6 +1413,7 @@ class MiMoV2ForCausalLM(nn.Module, AudioEncoderMixin):
                 self.lm_head,
                 forward_batch,
                 hidden_states_before_norm=hidden_states_before_norm,
+                aux_hidden_states=aux_hidden_states,
             )
         else:
             return hidden_states
@@ -1620,6 +1656,24 @@ class MiMoV2ForCausalLM(nn.Module, AudioEncoderMixin):
                 expected_fused_tp_size,
                 config=self.config,
             )
+
+    def set_dflash_layers_to_capture(self, layer_ids: List[int]):
+        if not self.pp_group.is_last_rank:
+            return
+
+        if layer_ids is None:
+            raise ValueError(
+                "DFLASH requires explicit layer_ids for aux hidden capture."
+            )
+
+        self.capture_aux_hidden_states = True
+        # This model captures AFTER each layer (hidden_states is that layer's
+        # output), so use layer_ids directly rather than the `val + 1`
+        # convention (which is for models that capture BEFORE the layer). The +1
+        # also drops the final layer: target_layer_ids includes 69, and 69+1=70
+        # is out of range for a 70-layer model, yielding 4 captured features
+        # instead of the 5 the draft expects.
+        self.model.layers_to_capture = list(layer_ids)
 
     def get_embed_and_head(self):
         assert self.model is not None and self.lm_head is not None, (

@@ -379,6 +379,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.with_bias = False
         self.use_flashinfer = get_moe_runner_backend().is_flashinfer_mxfp4()
         self.use_marlin = get_moe_runner_backend().is_marlin()
+        # MXFP4-serialized checkpoints use E2M1 weights and group-32 E8M0
+        # scales. The standalone Humming runner consumes this layout directly
+        # through humming.schema.mxfp4.
+        self.use_standalone_humming = get_moe_runner_backend().is_humming()
         # True W4A8: DeepGEMM fp8_fp4 grouped GEMM (SM100 MXF8F6F4 UMMA).
         # Weights stay MXFP4 (e2m1 + ue8m0 g32, zero requantization);
         # activations are quantized to fp8 per-token-group-128.
@@ -615,6 +619,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             set_weight_attrs(w2_weight_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer):
+        if self.use_standalone_humming:
+            from sglang.srt.layers.quantization.humming_utils import (
+                prepare_humming_moe_layer,
+            )
+
+            prepare_humming_moe_layer(layer, {"quant_method": "mxfp4"})
+            layer._mxfp4_backend = "humming"
+            return
+
         if self.use_marlin and not self.use_mega_moe:
             from sglang.srt.layers.quantization.marlin_utils import (
                 check_moe_marlin_supports_layer,
@@ -1433,6 +1446,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             or moe_runner_backend.is_triton()
             or moe_runner_backend.is_marlin()
             or moe_runner_backend.is_deep_gemm()
+            or moe_runner_backend.is_humming()
         ):
             self.runner = MoeRunner(moe_runner_backend, moe_runner_config)
         elif moe_runner_backend.is_flashinfer_mxfp4() and self._fi_kernel in (
@@ -1577,6 +1591,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             StandardCombineInput,
         )
         from sglang.srt.layers.moe.topk import TopKOutputChecker
+
+        if self.use_standalone_humming:
+            from sglang.srt.layers.moe.moe_runner.humming import (
+                HummingMoeQuantInfo,
+            )
+
+            quant_info = HummingMoeQuantInfo(layer=layer)
+            return self.runner.run(dispatch_output, quant_info)
 
         if self.use_deep_gemm:
             # Handles standard AND deepep_ll/deepep_normal dispatch formats via
