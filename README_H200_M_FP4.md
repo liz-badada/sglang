@@ -10,6 +10,20 @@ https://github.com/vllm-project/humming/commit/a74973b5079e42ef861720b62f847ce9d
 The commands below reproduce the `batch={4,8}` and `draft_tokens={6,8}` benchmark on one 8xH200 node with
 tensor parallelism 8 and expert parallelism 1.
 
+## Select W4A8 instead of W4A16
+
+The MXFP4 expert weights are W4 in both modes. Humming uses BF16 activations (W4A16) by default. To run W4A8,
+set the following environment variable in the server process:
+
+```bash
+SGLANG_HUMMING_INPUT_QUANT_CONFIG='{"a_dtype":"float8e4m3","input_scale_group_size":128}'
+```
+
+This enables dynamic group-128 FP8 E4M3 activation quantization for the Humming FC1 and FC2 paths. Merely
+selecting `--moe-runner-backend humming` does not enable W4A8; if the variable is absent, the run remains
+W4A16. Record `activation_dtype=float8e4m3`, `input_quantization=dynamic_group`, and
+`input_scale_group_size=128` in the benchmark manifest to make the selected path explicit.
+
 ## Correctness status
 
 The branch can start the server and execute DFlash. It contains speculative layer-capture configuration,
@@ -65,6 +79,7 @@ docker run --rm --init -d \
   --network host \
   --ipc host \
   --shm-size 64g \
+  -e 'SGLANG_HUMMING_INPUT_QUANT_CONFIG={"a_dtype":"float8e4m3","input_scale_group_size":128}' \
   -v "$NODE_SCRATCH:$NODE_SCRATCH" \
   -v "$PWD/python/sglang:/sgl-workspace/sglang/python/sglang:ro" \
   -v "$NODE_SCRATCH/rootcache:/root/.cache" \
