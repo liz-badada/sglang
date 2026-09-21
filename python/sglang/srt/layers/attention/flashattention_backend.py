@@ -11,6 +11,10 @@ from sglang.kernels.ops.attention.metadata import (
     normal_decode_set_metadata,
     prepare_swa_spec_page_table_triton,
 )
+from sglang.kernels.ops.attention.bidir_decode import (
+    bidir_decode_attention,
+    can_use_bidir_decode,
+)
 from sglang.kernels.ops.attention.pa_page_table import _build_pa_page_table
 from sglang.kernels.ops.attention.suffix_attention_merge import (
     can_use_fused_suffix_attention_merge,
@@ -1523,6 +1527,39 @@ class FlashAttentionBackend(AttentionBackend):
                     num_splits=self.num_splits,
                     out=_fa_out,
                     **kwargs,
+                )
+            elif (
+                not use_cascade_attn
+                and not use_local_attn
+                and can_use_bidir_decode(
+                    q=q,
+                    forward_mode=forward_batch.forward_mode,
+                    num_kv_heads=layer.tp_k_head_num,
+                    num_q_heads=layer.tp_q_head_num,
+                    head_dim=layer.head_dim,
+                    v_head_dim=layer.v_head_dim,
+                    window_size=window_size,
+                    causal=causal,
+                    page_size=self.page_size,
+                    softcap=layer.logit_cap,
+                    cache_seqlens=cache_seqlens,
+                    max_seqlen_q=max_seqlen_q,
+                    kwargs=kwargs,
+                )
+            ):
+                # reshape(), not contiguous(): q is the row-strided Q slice of
+                # a fused QKV output and this kernel takes explicit strides, so
+                # the copy FA3 needs is avoidable. reshape() still falls back to
+                # a copy for a layout that cannot be viewed.
+                result = bidir_decode_attention(
+                    q.reshape(-1, layer.tp_q_head_num, layer.head_dim),
+                    key_cache,
+                    value_cache,
+                    page_table,
+                    cache_seqlens,
+                    block_tokens=max_seqlen_q,
+                    sm_scale=layer.scaling,
+                    out=_fa_out,
                 )
             elif (
                 is_swa_layer
