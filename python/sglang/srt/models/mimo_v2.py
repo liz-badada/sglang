@@ -659,6 +659,7 @@ class MiMoV2Attention(nn.Module):
         self.v_size = self.num_kv_heads * self.v_head_dim
 
         self.v_scale = v_scale
+        self._v_scale_folded = False
 
         self.scaling = self.head_dim**-0.5
 
@@ -726,6 +727,30 @@ class MiMoV2Attention(nn.Module):
             state.pop("attn_intermediate_state")
         )
 
+    def fold_v_scale_into_o_proj(self) -> bool:
+        """Fold the constant value scale into the output projection weight.
+
+        Attention output is linear in the value tensor -- a sink term enters
+        only the softmax denominator -- and the projection is linear, so
+        scaling every value by a constant equals scaling the projection weight
+        by it. This trades a per-step elementwise kernel for a one-off scale at
+        load time. Only the weight is scaled, never a bias. Row-parallel
+        sharding is unaffected: each rank scales its own shard and the scalar
+        distributes over the cross-rank sum.
+        """
+        if self.v_scale is None or self._v_scale_folded:
+            return False
+        extra = [n for n, _ in self.o_proj.named_parameters() if n != "weight"]
+        # A quantized projection would carry scales that must move with the
+        # weight; fail loudly rather than desync them.
+        assert not extra, f"refusing to fold: o_proj carries extra params {extra}"
+        weight = self.o_proj.weight
+        assert weight.is_floating_point(), f"unexpected weight dtype {weight.dtype}"
+        with torch.no_grad():
+            weight.data.copy_((weight.data.float() * self.v_scale).to(weight.dtype))
+        self._v_scale_folded = True
+        return True
+
     def forward_prepare(
         self,
         positions: torch.Tensor,
@@ -738,8 +763,6 @@ class MiMoV2Attention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
 
         q, k = self.rotary_emb(positions, q, k)
-        if self.v_scale is not None:
-            v = v * self.v_scale
 
         inner_state = q, k, v, forward_batch
         return None, forward_batch, inner_state
@@ -768,8 +791,6 @@ class MiMoV2Attention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         # [t, h, d]
 
-        if self.v_scale is not None:
-            v = v * self.v_scale
         attn_output = self.attn(q, k, v, forward_batch, sinks=self.attention_sink_bias)
         output, _ = self.o_proj(attn_output)
         return output
@@ -1661,6 +1682,31 @@ class MiMoV2ForCausalLM(nn.Module, AudioEncoderMixin):
                 deferred_qkv_scale_inv,
                 expected_fused_tp_size,
                 config=self.config,
+            )
+
+        self._fold_attention_v_scale()
+
+    def _fold_attention_v_scale(self) -> None:
+        folded = sum(
+            int(m.fold_v_scale_into_o_proj())
+            for m in self.modules()
+            if isinstance(m, MiMoV2Attention)
+        )
+        if folded:
+            logger.info("Folded the value scale into %d o_proj weights", folded)
+            return
+        if any(
+            m.v_scale is not None
+            for m in self.modules()
+            if isinstance(m, MiMoV2Attention)
+        ):
+            # Weights were written again after the scale had been folded.
+            # Re-folding would square the constant, so it is skipped, which
+            # leaves the new weights unscaled. Neither outcome is silently
+            # correct, so say so.
+            logger.warning(
+                "Weights were loaded again after the value scale was folded; "
+                "the new weights are NOT scaled. Restart rather than reload."
             )
 
     def set_dflash_layers_to_capture(self, layer_ids: List[int]):
