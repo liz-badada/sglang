@@ -16,6 +16,24 @@ import torch
 import triton
 import triton.language as tl
 
+from sglang.kernels.jit.utils import cache_once, load_jit
+
+# CUDA path, same semantics as the Triton kernel below; other shapes fall
+# through. Query heads per program are chosen so W * HP == 16, one mma tile.
+_MMA_HP = {8: 2, 6: 2, 4: 4, 2: 8, 1: 16}
+_MMA_WINDOWS = (128, 129)
+
+
+@cache_once
+def _mma_module():
+    return load_jit(
+        "swa_decode_mma",
+        cuda_files=["attention/swa_decode_mma.cuh"],
+        cuda_wrappers=[("swa_decode_mma", "swa_decode_mma")],
+        extra_cuda_cflags=["--use_fast_math"],
+    )
+
+
 # Query heads per program. Smaller groups mean more programs; the gain stops
 # once the grid covers the machine.
 _HEADS_PER_PROGRAM = 2
@@ -155,6 +173,15 @@ def swa_decode_attention(
     k2 = k_cache.view(k_cache.shape[0], -1)
     v2 = v_cache.view(v_cache.shape[0], -1)
     n_keys = window_size - 1 + window_tokens
+
+    hp = _MMA_HP.get(window_tokens, 0)
+    if window_size in _MMA_WINDOWS and hp and hq % hp == 0:
+        _mma_module().swa_decode_mma(
+            q.view(m, hq, dqk), k2, v2, page_table, cache_seqlens,
+            sinks if sinks is not None else q, out_view,
+            sm_scale, window_tokens, window_size, hp, 1 if sinks is not None else 0,
+        )
+        return out
 
     grid = (bs, hq // heads_per_program)
     _swa_decode_attn_kernel[grid](
