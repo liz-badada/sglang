@@ -140,6 +140,9 @@ def can_use_swa_decode(
         return False
     if q.dtype != torch.bfloat16:
         return False
+    # Row and head strides are explicit; only the head dim must be contiguous.
+    if q.stride(-1) != 1:
+        return False
     if any(k in kwargs for k in ("q_descale", "k_descale", "v_descale")):
         return False
     # Uniform rows per request (the verify graph shape); ragged batches fall back.
@@ -161,7 +164,10 @@ def swa_decode_attention(
     heads_per_program: int = _HEADS_PER_PROGRAM,
 ) -> torch.Tensor:
     """q: [M, HQ, DQK]; k_cache: [slots, ..., DQK]; v_cache: [slots, ..., DV];
-    page_table: [bs, pages] (page_size 1); cache_seqlens: [bs] int32."""
+    page_table: [bs, pages] (page_size 1); cache_seqlens: [bs] int32.
+
+    Both kernels take the q row and head strides explicitly; only the head dim
+    must be contiguous."""
     m, hq, dqk = q.shape
     bs = cache_seqlens.shape[0]
     dv = v_cache.shape[-1]
@@ -175,10 +181,20 @@ def swa_decode_attention(
     n_keys = window_size - 1 + window_tokens
 
     hp = _MMA_HP.get(window_tokens, 0)
-    if window_size in _MMA_WINDOWS and hp and hq % hp == 0:
+    if (
+        window_size in _MMA_WINDOWS
+        and hp
+        and hq % hp == 0
+        # The CUDA query load is a 16-byte copy, so every query row and head has
+        # to start on a 16-byte boundary. Other layouts take the Triton path.
+        and q.stride(0) % 8 == 0
+        and q.stride(1) % 8 == 0
+        and q.data_ptr() % 16 == 0
+    ):
         _mma_module().swa_decode_mma(
-            q.view(m, hq, dqk), k2, v2, page_table, cache_seqlens,
+            q, k2, v2, page_table, cache_seqlens,
             sinks if sinks is not None else q, out_view,
+            q.stride(0), q.stride(1),
             sm_scale, window_tokens, window_size, hp, 1 if sinks is not None else 0,
         )
         return out
