@@ -88,12 +88,16 @@ __global__ __launch_bounds__(NW * 32) void swa_mma_kernel(
   constexpr int DTW = (DT8 + NW - 1) / NW;  // PV n-tiles owned by one warp
   constexpr int KCH = DQK / 8;   // 24 x 16 B chunks per K row
   constexpr int VCH = DV / 8;    // 16 x 16 B chunks per V row
+  // The PV ldm4t always reads a full 16-row k-step, so an odd NKT addresses 16
+  // rows past NPAD. Those lanes feed no mma, but the address must exist: do not
+  // drop these rows on the grounds that some later buffer would absorb them.
+  constexpr int VROWS = NPAD + 16;
 
   extern __shared__ char smem[];
   __nv_bfloat16* Qs = reinterpret_cast<__nv_bfloat16*>(smem);
   __nv_bfloat16* Ks = Qs + MPAD * KP;
   __nv_bfloat16* Vs = Ks + NPAD * KP;
-  __nv_bfloat16* Ps = Vs + NPAD * VP;
+  __nv_bfloat16* Ps = Vs + VROWS * VP;
   float* rmax = reinterpret_cast<float*>(Ps + MPAD * PP);
   float* rsum = rmax + NW * MPAD;
 
@@ -294,9 +298,10 @@ void launch_swa_mma(const void* q, const void* k, const void* v, const int* pt, 
   constexpr int NKEY = WINDOW - 1 + W;
   constexpr int NPAD = (NKEY + 15) / 16 * 16;
   constexpr int MPAD = 16;
+  constexpr int VROWS = NPAD + 16;  // see swa_mma_kernel
   constexpr size_t kSmem =
-      (size_t)(MPAD * (DQK + 8) + NPAD * (DQK + 8) + NPAD * (DV + 8) + MPAD * (NPAD + 8)) *
-          sizeof(__nv_bfloat16) +
+      (size_t)(MPAD * (DQK + 8) + NPAD * (DQK + 8) + VROWS * (DV + 8) +
+               MPAD * (NPAD + 8)) * sizeof(__nv_bfloat16) +
       (size_t)(2 * NW * MPAD) * sizeof(float);
   auto kern = swa_mma_kernel<W, HP, WINDOW, NW>;
   static std::once_flag once;
