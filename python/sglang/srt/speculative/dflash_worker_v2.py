@@ -1,5 +1,6 @@
 import logging
 import math
+import os
 from dataclasses import replace
 from typing import List, Optional, Tuple
 
@@ -428,6 +429,7 @@ class DFlashWorkerV2(BaseSpecWorker):
             mask_token_id=self._mask_token_id_override,
         )
         target_model = self._target_worker.model_runner.model
+        self._mask_embedding = self._load_mask_embedding(target_model)
         self._noise_embed_scale = (
             float(target_model.get_dflash_noise_embedding_scale())
             if hasattr(target_model, "get_dflash_noise_embedding_scale")
@@ -1180,6 +1182,56 @@ class DFlashWorkerV2(BaseSpecWorker):
             )
 
         return int(resolved_id)
+
+    def _load_mask_embedding(self, target_model) -> Optional[torch.Tensor]:
+        """Load the trained vector the draft expects at the slots it must predict.
+
+        A draft that borrows the target embedding table has no row of its own for
+        the mask token: the id lands past the tokenizer vocabulary, on padding that
+        no training ever touched, so the draft sees nothing at the positions it
+        exists to fill. The trained vector ships next to the draft weights instead
+        of in the safetensors index, so the weight loader never picks it up.
+        """
+        if (
+            _resolve_dflash_embedding_module(self.draft_model, target_model)
+            is not target_model.get_input_embeddings()
+        ):
+            return None
+
+        path = os.path.join(
+            self.draft_model_runner.model_config.model_path, "mask_embedding.pt"
+        )
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"DFLASH requires the trained mask embedding at {path}. "
+                "Without it the draft receives an untrained embedding row at every "
+                "masked slot and acceptance collapses to roughly one token."
+            )
+        blob = torch.load(path, map_location="cpu", weights_only=True)
+
+        stored_id = int(blob["mask_token_id"])
+        if stored_id != int(self._mask_token_id):
+            raise ValueError(
+                "DFLASH mask embedding does not belong to the resolved mask token. "
+                f"file mask_token_id={stored_id}, resolved mask_token_id={self._mask_token_id}."
+            )
+
+        embedding = blob["embedding"].reshape(-1)
+        hidden_size = int(self.target_worker.model_runner.model_config.hidden_size)
+        if embedding.numel() != hidden_size:
+            raise ValueError(
+                "DFLASH mask embedding has the wrong width. "
+                f"got {embedding.numel()}, expected target hidden_size={hidden_size}."
+            )
+
+        if self.ps.tp_rank == 0:
+            logger.info(
+                "Loaded DFLASH mask embedding. path=%s, mask_token_id=%s, norm=%.4f",
+                path,
+                stored_id,
+                float(embedding.float().norm()),
+            )
+        return embedding.to(device=self.device, dtype=self.draft_model_runner.dtype)
 
     def _propose_selector_block(
         self,
@@ -2177,6 +2229,14 @@ class DFlashWorkerV2(BaseSpecWorker):
             verify_out_cache_loc_2d.copy_(verify_out_cache_loc.view(bs, block_size))
 
         noise_embedding = embed_module(block_ids)
+        if self._mask_embedding is not None:
+            # The embedding output is already reduced across tensor-parallel ranks, so
+            # every rank writes the same vector and no collective is involved.
+            noise_embedding = torch.where(
+                (block_ids == self._mask_token_id).unsqueeze(-1),
+                self._mask_embedding,
+                noise_embedding,
+            )
         if self._noise_embed_scale != 1.0:
             noise_embedding = noise_embedding * self._noise_embed_scale
         input_embeds = noise_embedding.view(-1, noise_embedding.shape[-1])
