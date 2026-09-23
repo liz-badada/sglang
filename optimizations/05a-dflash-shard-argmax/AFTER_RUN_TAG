@@ -1,0 +1,88 @@
+SHIPPING CONFIGURATION -- the split reduction only, BLOCK unchanged at 8192 in
+both arms (8192 is the value the in-tree EAGLE top-1 path already uses). This is
+the configuration every headline number is measured at.
+
+  dfl_ctl_a/b/c   control, DFLASH_SHARD_ARGMAX=0   unprofiled
+  dfl_var_a/b/c   variant, DFLASH_SHARD_ARGMAX=1   unprofiled
+  dfl_pctl        control, DFLASH_SHARD_ARGMAX=0   profiled
+  dfl_pvar        variant, DFLASH_SHARD_ARGMAX=1   profiled
+
+  Both arms run the SAME patched source (r2/env/patch_dflash_shard_argmax.py)
+  and differ only by the environment toggle, so "the file was patched" cannot be
+  the difference between them. Each arm prints its RESOLVED toggle into its own
+  runs/<arm>/server.log as
+
+      DFLASH_SHARD_ARGMAX resolved=<0|1> num_org=124160 block=8192
+      num_splits=16 partial_ctas=96 max_tokens=<n>
+
+  and r2/dflash/out7/resolved.log reads it back from there rather than assuming
+  what was exported.
+
+  unprofiled pairs, three replicates, adjacent and interleaved, one node
+    dfl_ctl_a 0.9138  dfl_var_a 0.9050   -8.7 us/token   -42.6 us/step
+    dfl_ctl_b 0.9109  dfl_var_b 0.9048   -6.1 us/token   -29.6 us/step
+    dfl_ctl_c 0.9141  dfl_var_c 0.9069   -7.1 us/token   -34.8 us/step
+    median                               -7.1 us/token   -34.8 us/step  (-0.78%)
+    control-to-control spread 3.2 us/token; variant-to-variant 2.1 us/token
+    accept 4.8858 in ALL SIX arms, identical to four decimals
+    TTFT 500.7 -> 501.3 ms, unchanged
+
+  profiled pair, per-kernel medians over 88 launches, both ranks
+    at::native::reduce_kernel<512,1,ReduceOp<BFloat16,MaxOps>>  1.00/step, removed
+    TP0  40.416 -> (3.264 partial + 1.856 finalize) us/call
+         40.44  -> 5.12 us/step     net -35.32
+    TP1  40.912 -> (3.169 partial + 1.696 finalize) us/call
+         40.95  -> 4.91 us/step     net -36.04
+    launches/step 1246.1 -> 1247.1  (+1.0, one kernel becomes two)
+    neighbours flat: reduce_kernel<256,2> 6.52->6.03 / 6.54->6.60,
+                     _scatter_gather_elementwise 4.87->4.81 / 5.29->5.25
+    profiled step period 4465.7 -> 4434.4 us  (-31.4), not differenced against
+                     the unprofiled arms: the profiler term is arm-dependent
+
+    whole-trace busy delta DISCARDED as a ledger: +23.6 us/step on TP0 and
+    -51.1 on TP1, opposite signs on the two ranks of one pair, driven by the
+    MNNVL AllReduce families moving +46.3 / -14.7 us/step at unchanged call
+    count and unchanged 5.2 us/call median. That is peer-rank wait being
+    re-phased, not work changing. The kernel row and the step period are what
+    reconcile: -35.3/-36.0 against -34.8 us/step, 1.5%.
+
+  validity gates (r2/analysis2/gate_arms.py)
+    gate 1 accept/trace_steps   PASS both profiled arms, accept 4.89, 88 steps
+    gate 2 on-device delta      PASS, invocation diff names the removed kernel
+                                and the two added
+    gate 4 replicate tolerance  PASS, range -42.6..-29.6, spread 13.0 vs tol 100
+    the gate also reports "missing trace" for the unprofiled pairs; that is by
+    construction and is why the profiled pair exists
+
+  standalone, CUDA-graph replay, medians of 200 replays, real captured logits
+    before (torch.max, 6 CTAs)              30.512 us   min 30.4  max 31.0
+    after  (split 96 CTAs + finalize)        7.856 us   min  7.3  max 11.2
+    net                                    -22.656 us/call  (-74.5%)
+    contention probe 222.1 / 222.1 / 222.2 / 222.3 GFLOP/s/SM  (clean ~222)
+
+  BLOCK sweep at the decode shape -- the knob is spent, the decomposition is the
+  change:
+    2048  (366 CTAs)  30.496 -> 7.904   -22.592
+    4096  (186 CTAs)  30.528 -> 7.968   -22.560
+    8192  ( 96 CTAs)  30.512 -> 7.856   -22.656   <- shipped
+    16384 ( 48 CTAs)  30.416 -> 9.088   -21.328
+    32768 ( 24 CTAs)  30.784 -> 9.472   -21.312
+
+  bit equality vs the replaced torch.max, on real captured draft logits taken
+  in-engine from the live server on both TP ranks:
+    rank0 all 288 rows   value 0/288   index 0/288
+    rank1 all 288 rows   value 0/288   index 0/288
+    rank0 decode shape   value 0/6     index 0/6
+    zero at all five BLOCK values, so the equality is a property of the
+    decomposition and not of one block size
+
+  Artefacts:
+    shipped.diff                            the change as it lands in the tree
+                                            (verified to apply cleanly to a clean tree)
+    r2/env/patch_dflash_shard_argmax.py     the same change as the measured patch
+    r2/env/patch_dflash_dump_logits.py      real-activation capture for the gate
+    r2/dflash/bench/bench_shard_argmax.py   standalone before/after
+    r2/dflash/bench/sweep_blocks.py         gate + BLOCK sweep
+    r2/dflash/out7/bench_synth.json, sweep_real6.json,
+                   gate_real288_r0.json, gate_real288_r1.json
+    r2/dflash/analyze_arms.py, post.sh, out7/arms.log, out7/trace_diff_tp*.log

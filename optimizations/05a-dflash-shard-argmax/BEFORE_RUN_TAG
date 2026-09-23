@@ -1,0 +1,36 @@
+Reference trace (region sizing, unchanged engine)
+  sz7_ctl
+  runs/sz7_ctl/trace/1790158179.6848624-TP-0.trace.json.gz
+  resolved config: runs/sz7_ctl/sgl_args.txt
+    --tp-size 2 --speculative-algorithm DFLASH
+    --speculative-num-draft-tokens 7 --speculative-draft-attention-backend fa4
+
+  void at::native::reduce_kernel<512, 1,
+       at::native::ReduceOp<c10::BFloat16, at::native::MaxOps<c10::BFloat16>, ...>>
+                                 1.00 calls/step
+                                 40.32 us/call
+                                 40.68 us/step busy, 40.41 us/step critical
+                                 coverage 0.0067  -> 99.3% exposed
+                                 grid (6, 1, 1), block (128, 4, 1), smem 8208
+                                 graph 9239 node 39681202847831, stream 86
+  predecessor on the same stream:
+                                 nvjet_sm100_tst_128x8_64x12_2x1_v_bz_TNT
+                                 (draft lm_head, 970 CTAs, 76.78 us/call)
+  successor:
+                                 ncclDevKernel_AllGather_RING_LL (stream 6446)
+
+  bound  t_SOL = max(0, 2.08 us + 1,489,980 B / 7.37 TB/s) = 2.28 us
+         gap 17.7x, achieved 37.0 GB/s
+         logits [6, 124160] bf16; 124160 = num_org per rank at TP2, confirmed
+         from the lm_head weight bytes in the same capture (124160 x 2048 x 2)
+
+Paired control arms (this change)
+  dfl_ctl_a, dfl_ctl_b, dfl_ctl_c    unprofiled, DFLASH_SHARD_ARGMAX=0
+  dfl_pctl                           profiled, for kernel identity and counts
+  Each arm's resolved toggle is printed into its own runs/<arm>/server.log as
+  "DFLASH_SHARD_ARGMAX resolved=..." and is read from there, not assumed.
+
+Standalone control arm
+  r2/dflash/out7/bench_synth.json    key graph.before      (synthetic)
+  r2/dflash/out7/sweep_real6.json    rows[].before         (real logits)
+  r2/dflash/out7/gate_real288_r{0,1}.json                  (both ranks)
