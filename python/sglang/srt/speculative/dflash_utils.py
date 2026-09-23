@@ -426,6 +426,12 @@ def get_dflash_attention_sliding_window_size(config: Any) -> Optional[int]:
     return int(sliding_window) - 1
 
 
+def get_dflash_attention_value_scale(config: Any) -> Optional[float]:
+    """Constant the draft scales its attention values by, if the config declares one."""
+    scale = _get_dflash_config(config).get("attention_value_scale")
+    return None if scale is None else float(scale)
+
+
 def _cfg_get(config: Any, key: str, default: Any = None) -> Any:
     if isinstance(config, dict):
         return config.get(key, default)
