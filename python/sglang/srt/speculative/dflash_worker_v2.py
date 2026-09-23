@@ -12,6 +12,8 @@ from sglang.kernels.ops.speculative.cache_locs import (
 from sglang.kernels.ops.speculative.dflash import (
     _compute_dflash_accept_bonus_triton_unchecked,
     _prepare_dflash_draft_block_unchecked,
+    draft_top1_merge,
+    draft_top1_pack,
 )
 from sglang.kernels.ops.speculative.dspark.dspark_accept import (
     accept_sampling,
@@ -109,9 +111,11 @@ class _DflashDraftSampler:
     DFLASH's draft has no head of its own; it borrows the target `lm_head`.
 
     tp=1: plain argmax over the local (full) vocab shard.
-    tp>1: per-rank shard (max, global id) -> all-gather -> first-max select.
+    tp>1: each rank packs its shard's (max, global id) into one sortable int64,
+    one all-gather exchanges them and one kernel selects the winner.
     Tie resolution is bit-exact vs a full-vocab argmax: ranks own contiguous
-    ascending vocab shards and torch.argmax returns the FIRST max index.
+    ascending vocab shards, and the packed compare keeps the first max index
+    inside a shard and the lowest rank across shards.
     No added-vocab support (the builder bails to eager in that case).
     """
 
@@ -129,23 +133,9 @@ class _DflashDraftSampler:
         self.out = torch.empty((max_tokens,), dtype=torch.int64, device=device)
         if self.tp_size > 1:
             # Static buffers (fixed addresses) keep the in-graph select replay-safe.
-            self.local_max = torch.empty(
-                (max_tokens,), dtype=weight.dtype, device=device
-            )
-            self.local_arg = torch.empty(
-                (max_tokens,), dtype=torch.int64, device=device
-            )
-            self.gathered_max = torch.empty(
-                (self.tp_size * max_tokens,), dtype=weight.dtype, device=device
-            )
-            self.gathered_ids = torch.empty(
+            self.packed = torch.empty((max_tokens,), dtype=torch.int64, device=device)
+            self.gathered = torch.empty(
                 (self.tp_size * max_tokens,), dtype=torch.int64, device=device
-            )
-            self.best_rank = torch.empty(
-                (1, max_tokens), dtype=torch.int64, device=device
-            )
-            self.selected_ids = torch.empty(
-                (1, max_tokens), dtype=torch.int64, device=device
             )
 
     def __call__(self, hidden_states, input_ids=None):
@@ -164,20 +154,11 @@ class _DflashDraftSampler:
                 tokens += self.org_vocab_start
             self.out[:n].copy_(tokens)
             return
-        local_max = self.local_max[:n]
-        local_arg = self.local_arg[:n]
-        torch.max(logits, dim=-1, out=(local_max, local_arg))
-        if self.org_vocab_start:
-            local_arg.add_(self.org_vocab_start)
-        gathered_max = self.gathered_max[: self.tp_size * n]
-        gathered_ids = self.gathered_ids[: self.tp_size * n]
-        self.tp_group.all_gather_into_tensor(gathered_max, local_max)
-        self.tp_group.all_gather_into_tensor(gathered_ids, local_arg)
-        best_rank = self.best_rank[:, :n]
-        torch.argmax(gathered_max.view(self.tp_size, n), dim=0, out=best_rank[0])
-        selected = self.selected_ids[:, :n]
-        torch.gather(gathered_ids.view(self.tp_size, n), 0, best_rank, out=selected)
-        self.out[:n].copy_(selected.view(-1))
+        packed = self.packed[:n]
+        draft_top1_pack(logits, packed, self.org_vocab_start)
+        gathered = self.gathered[: self.tp_size * n]
+        self.tp_group.all_gather_into_tensor(gathered, packed)
+        draft_top1_merge(gathered.view(self.tp_size, n), self.out[:n])
 
 
 def _commit_accept(candidates, accept_len, bonus_tokens):

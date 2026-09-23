@@ -314,3 +314,89 @@ def selector_walk_triton(
         num_warps=1,
     )
     return tokens, q_rows
+
+
+@triton.jit
+def _draft_top1_pack_kernel(
+    logits_ptr,
+    out_ptr,
+    row_stride,
+    vocab_start,
+    vocab_size,
+    BLOCK: tl.constexpr,
+):
+    """Per-row argmax of one vocabulary shard, packed into a sortable int64.
+
+    The high 32 bits hold the maximum as an order-preserving signed key, the low
+    32 bits hold the global token id, so a plain integer comparison across ranks
+    ranks the candidates by logit.
+    """
+    row = tl.program_id(0).to(tl.int64)
+    row_ptr = logits_ptr + row * row_stride
+
+    best_value = tl.full((BLOCK,), float("-inf"), tl.float32)
+    best_index = tl.zeros((BLOCK,), tl.int64) + vocab_size.to(tl.int64)
+    for start in range(0, vocab_size, BLOCK):
+        cols = start + tl.arange(0, BLOCK)
+        in_range = cols < vocab_size
+        value = tl.load(row_ptr + cols, mask=in_range, other=float("-inf")).to(
+            tl.float32
+        )
+        # Strict greater keeps the lowest index of a repeated maximum, which is
+        # what torch.max reports.
+        higher = value > best_value
+        best_value = tl.where(higher, value, best_value)
+        best_index = tl.where(higher, cols.to(tl.int64), best_index)
+
+    top_value = tl.max(best_value, 0)
+    top_index = tl.min(
+        tl.where(best_value == top_value, best_index, vocab_size.to(tl.int64)), 0
+    )
+
+    bits = top_value.to(tl.int32, bitcast=True).to(tl.int64)
+    # Float bits are not monotonic across the sign; remap so integer order
+    # matches float order, still inside the signed 32-bit range.
+    key = tl.where(bits >= 0, bits, -bits - tl.full((), 2147483649, tl.int64))
+    packed = (key << 32) | (top_index + vocab_start.to(tl.int64))
+    tl.store(out_ptr + row, packed)
+
+
+@triton.jit
+def _draft_top1_merge_kernel(
+    gathered_ptr,
+    out_ptr,
+    rows,
+    TP_SIZE: tl.constexpr,
+):
+    """Pick the winning rank per row and unpack its global token id."""
+    row = tl.program_id(0).to(tl.int64)
+    best = tl.load(gathered_ptr + row)
+    for rank in tl.static_range(1, TP_SIZE):
+        candidate = tl.load(gathered_ptr + rank * rows.to(tl.int64) + row)
+        # Strict greater on the key alone keeps the lowest rank on a tie, which
+        # is what argmax over the gathered maxima reports.
+        best = tl.where((candidate >> 32) > (best >> 32), candidate, best)
+    tl.store(out_ptr + row, best & tl.full((), 0xFFFFFFFF, tl.int64))
+
+
+def draft_top1_pack(
+    logits: torch.Tensor, out: torch.Tensor, vocab_start: int
+) -> None:
+    """Write one packed (max logit, global token id) per row of `logits`."""
+    rows, vocab_size = logits.shape
+    block = min(2048, triton.next_power_of_2(vocab_size))
+    _draft_top1_pack_kernel[(rows,)](
+        logits,
+        out,
+        logits.stride(0),
+        vocab_start,
+        vocab_size,
+        BLOCK=block,
+        num_warps=16,
+    )
+
+
+def draft_top1_merge(gathered: torch.Tensor, out: torch.Tensor) -> None:
+    """Reduce the gathered per-rank candidates into one token id per row."""
+    tp_size, rows = gathered.shape
+    _draft_top1_merge_kernel[(rows,)](gathered, out, rows, TP_SIZE=tp_size, num_warps=1)
