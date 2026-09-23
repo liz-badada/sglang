@@ -40,6 +40,7 @@ from sglang.srt.runtime_context import get_parallel, get_spec
 from sglang.srt.speculative.dflash_utils import (
     can_dflash_slice_qkv_weight,
     get_dflash_attention_sliding_window_size,
+    get_dflash_attention_value_scale,
     get_dflash_layer_types,
     is_dense_head_weight,
     is_nemotron_35_draft_config,
@@ -252,6 +253,29 @@ class DFlashAttention(nn.Module):
             sliding_window_size=self.sliding_window_size,
             attn_type=self.attn_type,
         )
+        self.v_scale = get_dflash_attention_value_scale(config)
+        self._v_scale_folded = False
+
+    def fold_v_scale_into_o_proj(self) -> bool:
+        """Fold the constant value scale into the output projection weight.
+
+        Attention output is linear in the value tensor and the projection is
+        linear, so scaling every value by a constant equals scaling the
+        projection weight by it. Folding at load time keeps it off the step and
+        out of the KV cache, where the context entries are written by a separate
+        path. Row-parallel sharding is unaffected: each rank scales its own
+        shard and the scalar distributes over the cross-rank sum.
+        """
+        if self.v_scale is None or self._v_scale_folded:
+            return False
+        extra = [n for n, _ in self.o_proj.named_parameters() if n != "weight"]
+        assert not extra, f"refusing to fold: o_proj carries extra params {extra}"
+        weight = self.o_proj.weight
+        assert weight.is_floating_point(), f"unexpected weight dtype {weight.dtype}"
+        with torch.no_grad():
+            weight.data.copy_((weight.data.float() * self.v_scale).to(weight.dtype))
+        self._v_scale_folded = True
+        return True
 
     def forward_prepare_npu(self, positions, hidden_states):
         qkv, _ = self.qkv_proj(hidden_states)
@@ -664,6 +688,22 @@ class DFlashDraftModel(nn.Module):
                 ),
             )
 
+    def _fold_attention_v_scale(self) -> None:
+        folded = sum(
+            int(layer.self_attn.fold_v_scale_into_o_proj()) for layer in self.layers
+        )
+        if folded:
+            logger.info("Folded the draft value scale into %d o_proj weights", folded)
+        elif any(layer.self_attn.v_scale is not None for layer in self.layers):
+            # Re-folding would square the constant, so it is skipped, which
+            # leaves weights written after the first fold unscaled. Neither
+            # outcome is silently correct, so say so.
+            logger.warning(
+                "Draft weights were loaded again after the value scale was "
+                "folded; the new weights are NOT scaled. Restart rather than "
+                "reload."
+            )
+
     def set_block_size(self, block_size: int) -> None:
         """Adopt the block size the worker resolved.
 
@@ -846,6 +886,8 @@ class DFlashDraftModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(resolved_name)
+
+        self._fold_attention_v_scale()
 
         if self.projector_type == "domino":
             required = {
