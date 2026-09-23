@@ -1,0 +1,53 @@
+CONTROL ARMS -- draft block 7, the customer configuration
+(--speculative-num-draft-tokens 7; every arm's resolved block, BLOCK_N and
+ patch state are recorded in arms_b7.log, not assumed)
+
+Profiled control, the reference for every kernel-level number
+  cw_pctl
+  runs/cw_pctl/trace/1790161524.6746225-TP-0.trace.json.gz
+  runs/cw_pctl/trace/1790161524.6746225-TP-1.trace.json.gz
+
+  _causal_conv1d_update_kernel   30.00 calls/step, both ranks
+                                 3.872 us/call TP0, 3.904 TP1 (median)
+                                 116.9 us/step TP0, 116.8 TP1
+                                 115.2 us/step critical path TP0, 115.4 TP1
+                                 grid (1, 64, 1), block (128, 1, 1)
+                                 registers per thread 28   <- non-tree body
+                                 shared memory 512 B
+  steady-state window            88 decode steps
+  step count cross-check         gdn_decode_bf16state / 30 = 88.0, same window
+  launches/step                  1246.1 TP0, 1247.1 TP1
+  predecessor on the same stream fused_qkvzba_split_reshape_cat_contiguous_kernel
+                                 30.00 calls/step, 87.5 us/step TP0
+  successor on the same stream   fused_qkv_split_gdn_prefill_kernel
+                                 30.00 calls/step, 39.9 us/step TP0
+
+Unprofiled control arms (the end-to-end basis)
+  cw_ctl_a  0.9085 ms/token   TTFT 500.1 ms   accept 4.89
+  cw_ctl_b  0.9046 ms/token   TTFT 503.1 ms   accept 4.89
+  cw_ctl_c  0.9090 ms/token   TTFT 499.1 ms   accept 4.89
+  cw_ctl_d  0.9073 ms/token   TTFT 501.8 ms   accept 4.89
+  cw_pctl   0.9081 ms/token   TTFT 504.7 ms   accept 4.89   (profiled arm's
+                                                             unprofiled phase)
+
+  control mean 0.90735  sd 0.00197  spread 0.0044 ms/token = 21.5 us/step
+  All controls ran on one node in one allocation, interleaved with the variant
+  arms, with the ALU contention probe read before and after each.
+
+Standalone control arm
+  standalone_block7.json, keys "serial_bn64_T*" and "serial_bn256_T*"
+  us/call(T) = 1.091 + 0.2515 * T at BLOCK_N 64 (R^2 0.9963)
+
+In-engine launcher arguments at block 7, captured eager (patch_conv1d_dump.py)
+  seqlen 7; x (1, 4096, 7) stride (28672, 1, 4096)
+  conv_state (1583, 4096, 3) stride (12288, 3, 1)
+  intermediate window (49, 7, 4096, 3) stride (36864, 1, 9, 1)
+  weight (4096, 4) stride (4, 1); bias None
+  retrieve_next_token None; num_accept_tokens None; activation silu
+
+SUPERSEDED -- the block-14 control set this revision replaces
+  q35it_pctl   reference trace, 6.495 us/call, 195.0 us/step busy
+  cv_ctl_a 0.8471   cv_ctl_b 0.8521   cv_pctl 0.8503   spread 5.0 us/token
+  cvj_ctl 0.8026 (shipping-configuration control)
+  Reason: measured at --speculative-num-draft-tokens 14. This change's gain
+  scales with the draft-token count, so block-14 numbers do not transfer.

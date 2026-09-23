@@ -1,0 +1,147 @@
+ARM_START cw_ctl_a prof=0 patches='../gdn_conv7/env/patch_conv1d_probe.py' 03:40:57
+CLK_BEFORE FFMA throughput: 221.9
+CLK_AFTER FFMA throughput: 222.0
+ARM_DONE cw_ctl_a 03:45:48 RESULT {"variant": "cw_ctl_a", "tpot_ms": 0.9085, "ttft_ms": 500.1, "accept": 4.89}
+  RESOLVED node=(one node, one allocation)
+  RESOLVED block_arg=7
+  RESOLVED blockn_patch=patched BLOCK_N=256 -> 64
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  RESOLVED_CALL conv_state shape=(1583, 4096, 3) stride=(12288, 3, 1) dtype=torch.bfloat16
+  RESOLVED_CALL intermediate shape=(49, 7, 4096, 3) stride=(36864, 1, 9, 1) dtype=torch.bfloat16
+  RESOLVED_CALL weight shape=(4096, 4) stride=(4, 1) dtype=torch.bfloat16  retrieve_next_token_is_None=True num_accept_tokens_is_None=True
+  RESOLVED_CALL tile_branch_present=False BLOCK_N_literals=['256', '64']
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  GATE PASS variant=cw_ctl_a accept=4.89 trace_steps=n/a osl=400
+ARM_START cw_var_a prof=0 patches='../env/patch_conv1d_inplace.py,../gdn_conv7/env/patch_conv1d_probe.py' 03:45:48
+CLK_BEFORE FFMA throughput: 221.7
+CLK_AFTER FFMA throughput: 222.1
+ARM_DONE cw_var_a 03:50:45 RESULT {"variant": "cw_var_a", "tpot_ms": 0.9039, "ttft_ms": 500.7, "accept": 4.89}
+  RESOLVED node=(one node, one allocation)
+  RESOLVED block_arg=7
+  RESOLVED blockn_patch=patched BLOCK_N=256 -> 64
+  RESOLVED tile_patch=patch_conv1d_inplace: applied
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  RESOLVED_CALL conv_state shape=(1583, 4096, 3) stride=(12288, 3, 1) dtype=torch.bfloat16
+  RESOLVED_CALL intermediate shape=(49, 7, 4096, 3) stride=(36864, 1, 9, 1) dtype=torch.bfloat16
+  RESOLVED_CALL weight shape=(4096, 4) stride=(4, 1) dtype=torch.bfloat16  retrieve_next_token_is_None=True num_accept_tokens_is_None=True
+  RESOLVED_CALL tile_branch_present=True BLOCK_N_literals=['256', '64']
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  GATE PASS variant=cw_var_a accept=4.89 trace_steps=n/a osl=400
+ARM_START cw_ctl_b prof=0 patches='../gdn_conv7/env/patch_conv1d_probe.py' 03:50:45
+CLK_BEFORE FFMA throughput: 222.1
+CLK_AFTER FFMA throughput: 221.8
+ARM_DONE cw_ctl_b 03:55:40 RESULT {"variant": "cw_ctl_b", "tpot_ms": 0.9046, "ttft_ms": 503.1, "accept": 4.89}
+  RESOLVED node=(one node, one allocation)
+  RESOLVED block_arg=7
+  RESOLVED blockn_patch=patched BLOCK_N=256 -> 64
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  RESOLVED_CALL conv_state shape=(1583, 4096, 3) stride=(12288, 3, 1) dtype=torch.bfloat16
+  RESOLVED_CALL intermediate shape=(49, 7, 4096, 3) stride=(36864, 1, 9, 1) dtype=torch.bfloat16
+  RESOLVED_CALL weight shape=(4096, 4) stride=(4, 1) dtype=torch.bfloat16  retrieve_next_token_is_None=True num_accept_tokens_is_None=True
+  RESOLVED_CALL tile_branch_present=False BLOCK_N_literals=['256', '64']
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  GATE PASS variant=cw_ctl_b accept=4.89 trace_steps=n/a osl=400
+ARM_START cw_var_b prof=0 patches='../env/patch_conv1d_inplace.py,../gdn_conv7/env/patch_conv1d_probe.py' 03:55:40
+CLK_BEFORE FFMA throughput: 222.0
+CLK_AFTER FFMA throughput: 221.8
+ARM_DONE cw_var_b 04:00:37 RESULT {"variant": "cw_var_b", "tpot_ms": 0.9041, "ttft_ms": 500.1, "accept": 4.89}
+  RESOLVED node=(one node, one allocation)
+  RESOLVED block_arg=7
+  RESOLVED blockn_patch=patched BLOCK_N=256 -> 64
+  RESOLVED tile_patch=patch_conv1d_inplace: applied
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  RESOLVED_CALL conv_state shape=(1583, 4096, 3) stride=(12288, 3, 1) dtype=torch.bfloat16
+  RESOLVED_CALL intermediate shape=(49, 7, 4096, 3) stride=(36864, 1, 9, 1) dtype=torch.bfloat16
+  RESOLVED_CALL weight shape=(4096, 4) stride=(4, 1) dtype=torch.bfloat16  retrieve_next_token_is_None=True num_accept_tokens_is_None=True
+  RESOLVED_CALL tile_branch_present=True BLOCK_N_literals=['256', '64']
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  GATE PASS variant=cw_var_b accept=4.89 trace_steps=n/a osl=400
+ARM_START cw_pctl prof=1 patches='../gdn_conv7/env/patch_conv1d_probe.py' 04:00:37
+CLK_BEFORE FFMA throughput: 221.7
+CLK_AFTER FFMA throughput: 221.6
+ARM_DONE cw_pctl 04:06:35 RESULT {"variant": "cw_pctl", "tpot_ms": 0.9081, "ttft_ms": 504.7, "accept": 4.89}
+  RESOLVED node=(one node, one allocation)
+  RESOLVED block_arg=7
+  RESOLVED blockn_patch=patched BLOCK_N=256 -> 64
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  RESOLVED_CALL conv_state shape=(1583, 4096, 3) stride=(12288, 3, 1) dtype=torch.bfloat16
+  RESOLVED_CALL intermediate shape=(49, 7, 4096, 3) stride=(36864, 1, 9, 1) dtype=torch.bfloat16
+  RESOLVED_CALL weight shape=(4096, 4) stride=(4, 1) dtype=torch.bfloat16  retrieve_next_token_is_None=True num_accept_tokens_is_None=True
+  RESOLVED_CALL tile_branch_present=False BLOCK_N_literals=['256', '64']
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  GATE PASS variant=cw_pctl accept=4.89 trace_steps=88.1 osl=400
+ARM_START cw_pvar prof=1 patches='../env/patch_conv1d_inplace.py,../gdn_conv7/env/patch_conv1d_probe.py' 04:06:35
+CLK_BEFORE FFMA throughput: 221.7
+CLK_AFTER FFMA throughput: 221.8
+ARM_DONE cw_pvar 04:12:45 RESULT {"variant": "cw_pvar", "tpot_ms": 0.902, "ttft_ms": 500.5, "accept": 4.89}
+  RESOLVED node=(one node, one allocation)
+  RESOLVED block_arg=7
+  RESOLVED blockn_patch=patched BLOCK_N=256 -> 64
+  RESOLVED tile_patch=patch_conv1d_inplace: applied
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  RESOLVED_CALL conv_state shape=(1583, 4096, 3) stride=(12288, 3, 1) dtype=torch.bfloat16
+  RESOLVED_CALL intermediate shape=(49, 7, 4096, 3) stride=(36864, 1, 9, 1) dtype=torch.bfloat16
+  RESOLVED_CALL weight shape=(4096, 4) stride=(4, 1) dtype=torch.bfloat16  retrieve_next_token_is_None=True num_accept_tokens_is_None=True
+  RESOLVED_CALL tile_branch_present=True BLOCK_N_literals=['256', '64']
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  GATE PASS variant=cw_pvar accept=4.89 trace_steps=88.1 osl=400
+DONE arms_b7 04:12:45
+ARM_START cw_ctl_c prof=0 patches='../gdn_conv7/env/patch_conv1d_probe.py' 04:17:38
+CLK_BEFORE FFMA throughput: 222.1
+CLK_AFTER FFMA throughput: 221.8
+ARM_DONE cw_ctl_c 04:22:15 RESULT {"variant": "cw_ctl_c", "tpot_ms": 0.909, "ttft_ms": 499.1, "accept": 4.89}
+  RESOLVED node=(one node, one allocation)
+  RESOLVED block_arg=7
+  RESOLVED blockn_patch=patched BLOCK_N=256 -> 64
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  RESOLVED_CALL conv_state shape=(1583, 4096, 3) stride=(12288, 3, 1) dtype=torch.bfloat16
+  RESOLVED_CALL intermediate shape=(49, 7, 4096, 3) stride=(36864, 1, 9, 1) dtype=torch.bfloat16
+  RESOLVED_CALL weight shape=(4096, 4) stride=(4, 1) dtype=torch.bfloat16  retrieve_next_token_is_None=True num_accept_tokens_is_None=True
+  RESOLVED_CALL tile_branch_present=False BLOCK_N_literals=['256', '64']
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  GATE PASS variant=cw_ctl_c accept=4.89 trace_steps=n/a osl=400
+ARM_START cw_var_c prof=0 patches='../env/patch_conv1d_inplace.py,../gdn_conv7/env/patch_conv1d_probe.py' 04:22:15
+CLK_BEFORE FFMA throughput: 221.9
+CLK_AFTER FFMA throughput: 222.1
+ARM_DONE cw_var_c 04:27:33 RESULT {"variant": "cw_var_c", "tpot_ms": 0.9026, "ttft_ms": 500.2, "accept": 4.89}
+  RESOLVED node=(one node, one allocation)
+  RESOLVED block_arg=7
+  RESOLVED blockn_patch=patched BLOCK_N=256 -> 64
+  RESOLVED tile_patch=patch_conv1d_inplace: applied
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  RESOLVED_CALL conv_state shape=(1583, 4096, 3) stride=(12288, 3, 1) dtype=torch.bfloat16
+  RESOLVED_CALL intermediate shape=(49, 7, 4096, 3) stride=(36864, 1, 9, 1) dtype=torch.bfloat16
+  RESOLVED_CALL weight shape=(4096, 4) stride=(4, 1) dtype=torch.bfloat16  retrieve_next_token_is_None=True num_accept_tokens_is_None=True
+  RESOLVED_CALL tile_branch_present=True BLOCK_N_literals=['256', '64']
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  GATE PASS variant=cw_var_c accept=4.89 trace_steps=n/a osl=400
+ARM_START cw_ctl_d prof=0 patches='../gdn_conv7/env/patch_conv1d_probe.py' 04:27:33
+CLK_BEFORE FFMA throughput: 222.0
+CLK_AFTER FFMA throughput: 221.7
+ARM_DONE cw_ctl_d 04:32:26 RESULT {"variant": "cw_ctl_d", "tpot_ms": 0.9073, "ttft_ms": 501.8, "accept": 4.89}
+  RESOLVED node=(one node, one allocation)
+  RESOLVED block_arg=7
+  RESOLVED blockn_patch=patched BLOCK_N=256 -> 64
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  RESOLVED_CALL conv_state shape=(1583, 4096, 3) stride=(12288, 3, 1) dtype=torch.bfloat16
+  RESOLVED_CALL intermediate shape=(49, 7, 4096, 3) stride=(36864, 1, 9, 1) dtype=torch.bfloat16
+  RESOLVED_CALL weight shape=(4096, 4) stride=(4, 1) dtype=torch.bfloat16  retrieve_next_token_is_None=True num_accept_tokens_is_None=True
+  RESOLVED_CALL tile_branch_present=False BLOCK_N_literals=['256', '64']
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  GATE PASS variant=cw_ctl_d accept=4.89 trace_steps=n/a osl=400
+ARM_START cw_var_d prof=0 patches='../env/patch_conv1d_inplace.py,../gdn_conv7/env/patch_conv1d_probe.py' 04:32:26
+CLK_BEFORE FFMA throughput: 221.9
+CLK_AFTER FFMA throughput: 221.6
+ARM_DONE cw_var_d 04:37:40 RESULT {"variant": "cw_var_d", "tpot_ms": 0.9027, "ttft_ms": 501.6, "accept": 4.89}
+  RESOLVED node=(one node, one allocation)
+  RESOLVED block_arg=7
+  RESOLVED blockn_patch=patched BLOCK_N=256 -> 64
+  RESOLVED tile_patch=patch_conv1d_inplace: applied
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  RESOLVED_CALL conv_state shape=(1583, 4096, 3) stride=(12288, 3, 1) dtype=torch.bfloat16
+  RESOLVED_CALL intermediate shape=(49, 7, 4096, 3) stride=(36864, 1, 9, 1) dtype=torch.bfloat16
+  RESOLVED_CALL weight shape=(4096, 4) stride=(4, 1) dtype=torch.bfloat16  retrieve_next_token_is_None=True num_accept_tokens_is_None=True
+  RESOLVED_CALL tile_branch_present=True BLOCK_N_literals=['256', '64']
+  RESOLVED_CALL call=1 seqlen=7 x shape=(48, 4096, 7) stride=(28672, 1, 4096) dtype=torch.bfloat16
+  GATE PASS variant=cw_var_d accept=4.89 trace_steps=n/a osl=400
+DONE arms_b7_2 04:37:40

@@ -1,0 +1,84 @@
+VARIANT ARMS -- draft block 7, the customer configuration.
+The tile only; BLOCK_N is 64 in control and variant alike, set by the same
+pre-existing deployment patch, so an arm pair differs by the kernel body and
+nothing else. For an in-place edit the patch IS the change, so the arms differ
+by the patch rather than by a flag; each arm's block, BLOCK_N and tile state are
+recorded in arms_b7.log and arms_b7_2.log rather than assumed.
+
+  cw_var_a, cw_var_b, cw_var_c, cw_var_d   unprofiled, patch_conv1d_inplace
+  cw_pvar                                  profiled, kernel identity and counts
+  cw_cov                                   untimed, device-side invocation count
+
+Profiled variant
+  cw_pvar
+  runs/cw_pvar/trace/*-TP-0.trace.json.gz
+  runs/cw_pvar/trace/*-TP-1.trace.json.gz
+
+  _causal_conv1d_update_kernel   30.00 calls/step, both ranks, both arms
+    TP0   3.872 -> 3.136 us/call   116.9 -> 95.1 us/step   -21.8
+    TP1   3.904 -> 3.168 us/call   116.8 -> 95.4 us/step   -21.4
+    crit  TP0 115.2 -> 93.5 (-21.7)   TP1 115.4 -> 93.9 (-21.5)
+    launches/step 1246.1 -> 1246.1 (TP0), 1247.1 -> 1247.1 (TP1)
+    neighbours flat within 0.5%
+    arm totals (busy, union, profiled step period) discarded: they disagree in
+    sign between the two ranks and are 6-10x the effect, i.e. they measure the
+    profiler's per-arm overhead. The critical-path term, taken inside one arm,
+    is what reconciles.
+
+Unprofiled variant arms and the four pairs
+  cw_var_a  0.9039 ms/token   TTFT 500.7 ms   accept 4.89
+  cw_var_b  0.9041 ms/token   TTFT 500.1 ms   accept 4.89
+  cw_var_c  0.9026 ms/token   TTFT 500.2 ms   accept 4.89
+  cw_var_d  0.9027 ms/token   TTFT 501.6 ms   accept 4.89
+  cw_pvar   0.9020 ms/token   TTFT 500.5 ms   accept 4.89  (unprofiled phase)
+
+  pair A  0.9085 -> 0.9039   -0.0046 ms/token   -22.5 us/step
+  pair B  0.9046 -> 0.9041   -0.0005 ms/token    -2.4 us/step
+  pair C  0.9090 -> 0.9026   -0.0064 ms/token   -31.3 us/step
+  pair D  0.9073 -> 0.9027   -0.0046 ms/token   -22.5 us/step
+
+  variant mean 0.90333  sd 0.00079  spread 0.0015 ms/token = 7.3 us/step
+  difference of means   -0.00403 ms/token   4436.9 -> 4417.3 us/step
+                        -19.7 us/step  (-0.44%)
+
+  Resolvability: the effect equals the control-to-control spread (21.5 us/step),
+  so ONE pair cannot see it -- pair B measured -2.4 us/step. Four pairs can:
+  every variant arm is below every control arm, exact permutation p = 0.014,
+  paired t = 3.22 on 3 df. This is stated as a limit of the measurement, not
+  worked around.
+
+Standalone variant arm, BLOCK_N 64
+  standalone_block7.json, keys "tiled_bn64_T*"
+  us/call(T) = 1.802 + 0.0622 * T   (R^2 0.7907; the residual is the
+  power-of-two tile staircase, see COMPARISON.md section 2)
+  T=4  1.884   T=7  2.368   T=8  2.327   T=12  2.701   T=16  2.654
+  against serial 2.001 / 2.937 / 3.144 / 4.125 / 5.070
+  slope falls 4.04x; intercept rises 0.711 us; break-even at T = 3.76
+
+Bit equality vs the replaced code, block-7 decode shape, real engine tensors
+  out                 0 of 28672      (whole output)
+  conv_state          0 of 12288      (the cache line this call writes)
+  window              0 of 36864      (the window slot this call writes)
+  conv_state pool     0 of 19451904
+  window buffer       0 of 1806336
+  max abs difference on out 0.0; registers 28 -> 48; the layer has no bias
+
+Device-side invocation count (cw_cov, untimed, eager)
+  rank 0: host_calls=1800 device_launches=1800 seqlen_hist={7: 1800}
+          tree_branch=0 tile_branch=1800
+  rank 1: identical
+  Sampled at 300, 600, ..., 1800 on each rank; device count equals host count at
+  every sample, every launch compiled for seqlen 7, the eagle-tree body never
+  entered.
+
+Contention probe: 24 readings across all arms, 221.6-222.1 GFLOP/s/SM, against a
+clean-node reference of ~222 and a contended reading of ~108.
+
+SUPERSEDED -- the block-14 variant set this revision replaces
+  cvj_var 0.7882 / cvj_pvar, arm set `cvj_*`   -81.2 us/step, -80.8 us/step kernel
+  cvi_var (tile + BLOCK_N 32)                  -100.4 us/step
+  cv_var_a/b (instrumented build, 4 arms)       -91.9 us/step
+  Reason: measured at --speculative-num-draft-tokens 14. The gain scales with
+  the draft-token count, so none of it transfers to block 7.
+  Artefacts of that round kept for comparison: bench_inplace.py,
+  standalone_inplace.json, arms_ship.log.

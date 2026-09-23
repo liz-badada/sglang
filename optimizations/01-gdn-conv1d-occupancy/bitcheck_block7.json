@@ -1,0 +1,40 @@
+{
+ "T": 7,
+ "block_n": 64,
+ "conv_state_slot": 7,
+ "window_slot": 0,
+ "written_region": {
+  "out": [
+   0,
+   28672
+  ],
+  "conv_state_slot": [
+   0,
+   12288
+  ],
+  "intermediate_window_slot": [
+   0,
+   36864
+  ]
+ },
+ "whole_buffer": {
+  "out": [
+   0,
+   28672
+  ],
+  "conv_state_pool": [
+   0,
+   19451904
+  ],
+  "intermediate_window_buffer": [
+   0,
+   1806336
+  ]
+ },
+ "max_abs_out": 0.0,
+ "out_rms": 0.3328969478607178,
+ "conv_state_slot_rms": 2.5433571338653564,
+ "window_slot_rms": 2.413534164428711,
+ "has_bias": false,
+ "provenance": "r2/gdn_conv7/data/r0/conv_meta.json, decode call 300, block 7"
+}
