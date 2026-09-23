@@ -81,9 +81,22 @@ _SM100_FP8_FP4_CONFIG = _MegaMoeArchConfig(
     use_dp_max_tokens=False,
     fold_routed_scaling_in_pre_dispatch=False,
 )
+_SM90_MXFP4_CONFIG = _MegaMoeArchConfig(
+    name="sm90_mxfp4",
+    deep_gemm_entry="mxfp4_mega_moe",
+    run_recipe=(1, 1, 32),
+    scale_recipe=(1, 32),
+    # 128, not the weight group size 32: SM90 activation quantization is
+    # group-128 regardless of weight format; group 32 is weight-scale only.
+    pre_dispatch_group_size=128,
+    fp4_weight_packed=True,
+    uses_raw_fp32_scales=True,
+    use_dp_max_tokens=True,
+    fold_routed_scaling_in_pre_dispatch=True,
+)
 _MEGA_MOE_ARCH_CONFIGS = {
     config.name: config
-    for config in (_SM90_FP8_CONFIG, _SM100_FP8_FP4_CONFIG)
+    for config in (_SM90_FP8_CONFIG, _SM100_FP8_FP4_CONFIG, _SM90_MXFP4_CONFIG)
 }
 
 
@@ -105,6 +118,12 @@ def _select_mega_moe_arch_config(
         and w2.dtype == torch.int8
     ):
         return _SM100_FP8_FP4_CONFIG
+    if (
+        _device_sm == 90
+        and w13.dtype == torch.int8
+        and w2.dtype == torch.int8
+    ):
+        return _SM90_MXFP4_CONFIG
     return None
 
 
@@ -161,10 +180,12 @@ def _get_mega_moe_symm_buffer(
             )
             if get_symm_buffer is None:
                 raise RuntimeError(
-                    "DeepGEMM SM90 FP8 MegaMoE requires "
+                    "DeepGEMM SM90 MegaMoE requires "
                     "get_symm_buffer_for_sm90_mega_moe; update DeepGEMM."
                 )
         else:
+            # mega.hpp's mxfp4_mega_moe checks against the generic sizing fn,
+            # not the sm90-specific one, which undersizes the buffer here.
             get_symm_buffer = deep_gemm.get_symm_buffer_for_mega_moe
         buf = get_symm_buffer(
             group,
@@ -455,16 +476,27 @@ def _run_mega_routed(
         device=hidden_states.device,
     )
     swiglu_limit = getattr(moe.config, "swiglu_limit", None)
-    getattr(deep_gemm, config.deep_gemm_entry)(
-        y,
-        moe.experts.mega_l1_weights,
-        moe.experts.mega_l2_weights,
-        buf,
-        recipe=config.run_recipe,
-        activation="swiglu",
-        activation_clamp=swiglu_limit,
-        fast_math=True,
-    )
+    if config.name == _SM90_MXFP4_CONFIG.name:
+        # mxfp4_mega_moe has no recipe/activation kwargs (SwiGLU-only).
+        deep_gemm.mxfp4_mega_moe(
+            y,
+            moe.experts.mega_l1_weights,
+            moe.experts.mega_l2_weights,
+            buf,
+            activation_clamp=swiglu_limit,
+            fast_math=True,
+        )
+    else:
+        getattr(deep_gemm, config.deep_gemm_entry)(
+            y,
+            moe.experts.mega_l1_weights,
+            moe.experts.mega_l2_weights,
+            buf,
+            recipe=config.run_recipe,
+            activation="swiglu",
+            activation_clamp=swiglu_limit,
+            fast_math=True,
+        )
     y = y[:num_tokens]
 
     if (
@@ -516,6 +548,25 @@ def _transpose_mega_moe_sf_for_utccp(sf: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(sf).copy_(result)
 
 
+def _repack_sequential_nibbles_to_marlin(packed: torch.Tensor) -> torch.Tensor:
+    # Checkpoint nibbles are sequentially packed; DeepGEMM's dequant expects
+    # quantize_to_mxfp4's Marlin chunk-of-8 permutation instead.
+    *outer_shape, half_k = packed.shape
+    assert half_k % 4 == 0
+    lo = packed & 0xF
+    hi = (packed >> 4) & 0xF
+    nibbles = torch.empty(*outer_shape, half_k * 2, dtype=torch.uint8, device=packed.device)
+    nibbles.view(*outer_shape, half_k, 2)[..., 0] = lo
+    nibbles.view(*outer_shape, half_k, 2)[..., 1] = hi
+    chunks = nibbles.view(*outer_shape, half_k * 2 // 8, 8)
+    return (
+        (chunks[..., 4:8] | (chunks[..., 0:4] << 4))
+        .to(torch.uint8)
+        .view(*outer_shape, half_k)
+        .contiguous()
+    )
+
+
 def build_mega_moe_experts_weights(experts) -> bool:
     from deep_gemm import (
         transform_sf_into_required_layout,
@@ -532,6 +583,27 @@ def build_mega_moe_experts_weights(experts) -> bool:
     config = _select_mega_moe_arch_config(w13, w2)
     if config is None:
         return False
+
+    if config.name == _SM90_MXFP4_CONFIG.name:
+        # MXFP4's group-32 E8M0 scales need the raw packed/E8M0-byte
+        # transform, not the generic fp8/nvfp4 path below.
+        from deep_gemm import transform_mxfp4_weights_for_mega_moe_sm90
+
+        # Re-encode fp32 back to the E8M0 byte before viewing as uint8.
+        w13_sf_e8m0 = w13_sf_fp32.to(torch.float8_e8m0fnu)
+        w2_sf_e8m0 = w2_sf_fp32.to(torch.float8_e8m0fnu)
+
+        w13_marlin = _repack_sequential_nibbles_to_marlin(w13.view(torch.uint8))
+        w2_marlin = _repack_sequential_nibbles_to_marlin(w2.view(torch.uint8))
+        l1_weights, l2_weights = transform_mxfp4_weights_for_mega_moe_sm90(
+            (w13_marlin, w13_sf_e8m0.view(torch.uint8)),
+            (w2_marlin, w2_sf_e8m0.view(torch.uint8)),
+        )
+        experts.mega_l1_weights = l1_weights
+        experts.mega_l2_weights = l2_weights
+        experts._mega_moe_arch = config.name
+        experts._mega_moe_weights_built = True
+        return True
 
     num_groups, n1, half_k1 = w13.shape
     _, n2, half_k2 = w2.shape
