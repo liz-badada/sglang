@@ -406,10 +406,36 @@ def get_dflash_layer_types(config: Any) -> Optional[Sequence[str]]:
     return layer_types
 
 
+def get_dflash_declared_sliding_window_size(config: Any) -> Optional[int]:
+    """Window the draft checkpoint declares for itself, as window_left.
+
+    A DFlash draft loads under its backbone config class, which derives
+    layer_types and sliding_window from fields these checkpoints do not set, so
+    a window declared at the top level is dropped before anything can read it.
+    dflash_config survives that, so it is where a draft states the window it was
+    trained with.
+    """
+    dflash_config = _get_dflash_config(config)
+    if not dflash_config.get("use_swa", False):
+        return None
+    window = dflash_config.get("swa_window_size")
+    if window is None:
+        raise ValueError(
+            "DFLASH dflash_config.use_swa is set but swa_window_size is missing."
+        )
+    window = int(window)
+    if window < 1:
+        raise ValueError(
+            f"DFLASH dflash_config.swa_window_size must be positive, got {window}."
+        )
+    # HF sliding windows include the current token; SGLang stores window_left.
+    return window - 1
+
+
 def get_dflash_attention_sliding_window_size(config: Any) -> Optional[int]:
     layer_types = get_dflash_layer_types(config)
     if layer_types is None or "sliding_attention" not in layer_types:
-        return None
+        return get_dflash_declared_sliding_window_size(config)
 
     text_config = _get_text_config(config)
     sliding_window = _cfg_get(

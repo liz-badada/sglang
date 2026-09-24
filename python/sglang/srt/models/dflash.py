@@ -41,6 +41,7 @@ from sglang.srt.speculative.dflash_utils import (
     can_dflash_slice_qkv_weight,
     get_dflash_attention_sliding_window_size,
     get_dflash_attention_value_scale,
+    get_dflash_declared_sliding_window_size,
     get_dflash_layer_types,
     is_dense_head_weight,
     is_nemotron_35_draft_config,
@@ -115,6 +116,14 @@ def _get_dflash_layer_attention_params(
     config, layer_id: int
 ) -> Tuple[int, AttentionType]:
     layer_types = get_dflash_layer_types(config)
+    if layer_types is None or "sliding_attention" not in layer_types:
+        # layer_types comes from the backbone config class, which cannot carry a
+        # DFlash draft's own window; dflash_config states one for every layer.
+        declared_window = get_dflash_declared_sliding_window_size(config)
+        if declared_window is not None:
+            return declared_window, _get_dflash_attention_type(
+                config, default=AttentionType.ENCODER_ONLY
+            )
     if layer_types is None:
         return -1, AttentionType.ENCODER_ONLY
     if layer_id >= len(layer_types):

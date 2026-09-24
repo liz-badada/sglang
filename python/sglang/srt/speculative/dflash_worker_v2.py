@@ -19,6 +19,7 @@ from sglang.kernels.ops.speculative.dflash import (
 from sglang.kernels.ops.speculative.dspark.dspark_accept import (
     accept_sampling,
 )
+from sglang.srt.arg_groups.choices import SLIDING_WINDOW_DRAFT_ATTENTION_BACKENDS
 from sglang.srt.configs.hybrid_arch import mambaish_config
 from sglang.srt.distributed import get_tp_group
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
@@ -59,6 +60,7 @@ from sglang.srt.speculative.dflash_utils import (
     can_dflash_use_fused_qkv_proj,
     compute_dflash_correct_drafts_and_bonus,
     compute_dflash_sampling_correct_drafts_and_bonus,
+    get_dflash_declared_sliding_window_size,
     is_dense_head_weight,
     is_dflash_sampling_verify_available,
     parse_dflash_draft_config,
@@ -414,6 +416,7 @@ class DFlashWorkerV2(BaseSpecWorker):
                     self.block_size,
                     model_block_size,
                 )
+        self._check_declared_draft_window(bundle.resolved_attention_backend)
         self.draft_model.set_block_size(self.block_size)
         self.speculative_num_draft_tokens = int(self.block_size)
         if self._is_domino and self.block_size <= 1:
@@ -1099,6 +1102,25 @@ class DFlashWorkerV2(BaseSpecWorker):
                 block_end,
                 verify_out_cache_loc_2d.reshape(-1),
                 bs,
+            )
+
+    def _check_declared_draft_window(self, attention_backend: str) -> None:
+        """Refuse to serve a declared draft window nothing would apply."""
+        window_left = get_dflash_declared_sliding_window_size(self.draft_model.config)
+        if window_left is None:
+            return
+        if window_left + 1 < self.block_size:
+            raise ValueError(
+                "DFLASH draft declares a sliding window of "
+                f"{window_left + 1} tokens, which is narrower than its block "
+                f"size {self.block_size}; the draft could not see its own block."
+            )
+        if attention_backend not in SLIDING_WINDOW_DRAFT_ATTENTION_BACKENDS:
+            raise ValueError(
+                "DFLASH draft declares a sliding window of "
+                f"{window_left + 1} tokens, which attention backend "
+                f"{attention_backend!r} does not apply. Choose a backend in "
+                f"{sorted(SLIDING_WINDOW_DRAFT_ATTENTION_BACKENDS)}."
             )
 
     def _resolve_mask_token_id(

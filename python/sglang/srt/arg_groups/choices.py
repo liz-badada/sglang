@@ -114,6 +114,12 @@ DRAFT_ATTENTION_BACKEND_CHOICES = [
     "intel_xpu",
 ]
 
+# Draft backends that apply RadixAttention.sliding_window_size; the rest read
+# the whole context whatever the draft declares.
+SLIDING_WINDOW_DRAFT_ATTENTION_BACKENDS = frozenset(
+    {"flashinfer", "fa3", "fa4", "triton", "trtllm_mha", "intel_xpu"}
+)
+
 DETERMINISTIC_ATTENTION_BACKEND_CHOICES = [
     "ascend",
     "fa3",
