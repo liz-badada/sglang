@@ -371,8 +371,13 @@ def _draft_top1_merge_kernel(
     """Pick the winning rank per row and unpack its global token id."""
     row = tl.program_id(0).to(tl.int64)
     best = tl.load(gathered_ptr + row)
+    # The int64 `offset` leads every addition, so the index stays 64-bit without
+    # widening `rows`: Triton passes an int argument whose value is 1 as a plain
+    # Python int, and `rows` is 1 whenever batch 1 meets a draft window of 2.
+    offset = row
     for rank in tl.static_range(1, TP_SIZE):
-        candidate = tl.load(gathered_ptr + rank * rows.to(tl.int64) + row)
+        offset += rows
+        candidate = tl.load(gathered_ptr + offset)
         # Strict greater on the key alone keeps the lowest rank on a tie, which
         # is what argmax over the gathered maxima reports.
         best = tl.where((candidate >> 32) > (best >> 32), candidate, best)
