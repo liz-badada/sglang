@@ -22,12 +22,36 @@ _HEADS_PER_PROGRAM = 8
 _BLOCK_N = 64
 _NUM_WARPS = 4
 _NUM_STAGES = 3
-# NSPLIT is chosen to put the grid near this many programs.
-_TARGET_GRID = 128
+# Programs the grid is sized for. The floor covers the machine once, which is
+# all a short key range can use; past the ceiling more programs stop adding
+# throughput.
+_MIN_GRID = 128
+_MAX_GRID = 256
 _MAX_NSPLIT = 64
+# Key blocks a split is given before the range is split any further. The fp32
+# partial buffer is written once and read back once per split, so past this the
+# traffic that matters is the partial buffer rather than the KV cache.
+_BLOCKS_PER_SPLIT = 8
 
 # The draft block is 6-8 tokens; the cap rejects anything that is not one.
 _MAX_BLOCK_TOKENS = 32
+
+
+@triton.jit
+def _split_count(
+    seqlen,
+    BLOCK_N: tl.constexpr, BPS: tl.constexpr,
+    NSPLIT: tl.constexpr, NSPLIT_MIN: tl.constexpr,
+):
+    """Splits this request's key range is actually cut into.
+
+    NSPLIT is the grid, which a CUDA graph bakes at capture time, so the count
+    is narrowed here instead. Both kernels must agree on it: the decode kernel
+    leaves the splits above it unwritten and the combine must not read them.
+    """
+    nblk = tl.cdiv(seqlen, BLOCK_N)
+    ns = tl.minimum(NSPLIT, tl.maximum(NSPLIT_MIN, tl.cdiv(nblk, BPS)))
+    return tl.minimum(ns, tl.maximum(nblk, 1))
 
 
 @triton.jit
@@ -42,7 +66,9 @@ def _bidir_decode_kernel(
     D: tl.constexpr, DV: tl.constexpr,
     BLOCK_R: tl.constexpr,    # next pow2 >= W * HP, min 16 for tl.dot
     BLOCK_N: tl.constexpr,    # keys per iteration
-    NSPLIT: tl.constexpr,     # kv splits; 1 = single-kernel path
+    NSPLIT: tl.constexpr,     # kv split bound; 1 = single-kernel path
+    NSPLIT_MIN: tl.constexpr, # kv splits a short key range still gets
+    BPS: tl.constexpr,        # key blocks per split before splitting further
     HQN: tl.constexpr,        # total query heads (for the PART_LSE index)
 ):
     b = tl.program_id(0)
@@ -50,6 +76,9 @@ def _bidir_decode_kernel(
     sp = tl.program_id(2)
 
     seqlen = tl.load(SEQLENS + b)
+    nsplit = _split_count(seqlen, BLOCK_N, BPS, NSPLIT, NSPLIT_MIN)
+    if sp >= nsplit:
+        return
 
     rows = tl.arange(0, BLOCK_R)
     rvalid = rows < W * HP
@@ -71,8 +100,8 @@ def _bidir_decode_kernel(
     dv = tl.arange(0, DV)
 
     # Strided, not contiguous: a contiguous split leaves late programs empty
-    # whenever NSPLIT does not divide nblk.
-    for bi in tl.range(sp, nblk, NSPLIT):
+    # whenever the split count does not divide nblk.
+    for bi in tl.range(sp, nblk, nsplit):
         start = bi * BLOCK_N
         j = start + tl.arange(0, BLOCK_N)
         kvalid = j < seqlen
@@ -123,14 +152,22 @@ def _bidir_decode_kernel(
 
 @triton.jit
 def _bidir_combine_kernel(
-    PART_O, PART_LSE, OUT,
+    PART_O, PART_LSE, OUT, SEQLENS,
     stride_pob, stride_poh, stride_pos, stride_om, stride_oh,
-    NSPLIT: tl.constexpr, DV: tl.constexpr, HQN: tl.constexpr,
+    W: tl.constexpr, BLOCK_N: tl.constexpr, BPS: tl.constexpr,
+    NSPLIT: tl.constexpr, NSPLIT_MIN: tl.constexpr,
+    DV: tl.constexpr, HQN: tl.constexpr,
 ):
     m = tl.program_id(0)
     h = tl.program_id(1)
+    # A split at or above the count is one the decode kernel returned from, so
+    # its partial is uninitialised and must be masked out rather than read.
+    nsplit = _split_count(tl.load(SEQLENS + m // W), BLOCK_N, BPS, NSPLIT,
+                          NSPLIT_MIN)
     sp = tl.arange(0, NSPLIT)
-    lse = tl.load(PART_LSE + m * (HQN * NSPLIT) + h * NSPLIT + sp)
+    live = sp < nsplit
+    lse = tl.load(PART_LSE + m * (HQN * NSPLIT) + h * NSPLIT + sp,
+                  mask=live, other=float("-inf"))
     mx = tl.max(lse)
     # All splits empty (cache_seqlens == 0 on a padded slot): mx is -inf and
     # exp(-inf - -inf) is NaN. Pin the frame and let the zero denominator
@@ -139,17 +176,19 @@ def _bidir_combine_kernel(
     w = tl.exp(lse - mx)
     dv = tl.arange(0, DV)
     po = tl.load(PART_O + m * stride_pob + h * stride_poh
-                 + sp[:, None] * stride_pos + dv[None, :])
+                 + sp[:, None] * stride_pos + dv[None, :],
+                 mask=live[:, None], other=0.0)
     den = tl.sum(w)
     o = tl.sum(po * w[:, None], 0) / tl.where(den > 0, den, 1.0)
     tl.store(OUT + m * stride_om + h * stride_oh + dv,
              o.to(OUT.dtype.element_ty))
 
 
-def _pick_nsplit(bs: int, head_groups: int) -> int:
-    """Split the key range just enough to cover the machine, rounded down to a
-    power of two (the combine kernel indexes splits with tl.arange)."""
-    want = max(1, _TARGET_GRID // max(1, bs * head_groups))
+def _pick_nsplit(bs: int, head_groups: int, target_grid: int) -> int:
+    """Key splits per request and head group that put the grid near
+    target_grid, rounded down to a power of two (the combine kernel indexes
+    splits with tl.arange)."""
+    want = max(1, target_grid // max(1, bs * head_groups))
     ns = 1
     while ns * 2 <= min(want, _MAX_NSPLIT):
         ns *= 2
@@ -242,7 +281,8 @@ def bidir_decode_attention(
     v2 = v_cache.view(v_cache.shape[0], -1)
     head_groups = hq // heads_per_program
     if nsplit is None:
-        nsplit = _pick_nsplit(bs, head_groups)
+        nsplit = _pick_nsplit(bs, head_groups, _MAX_GRID)
+    nsplit_min = min(nsplit, _pick_nsplit(bs, head_groups, _MIN_GRID))
 
     if nsplit == 1:
         part_o = part_lse = q            # unused dummy pointers
@@ -265,14 +305,16 @@ def bidir_decode_attention(
         W=block_tokens, HP=heads_per_program,
         D=d, DV=dv,
         BLOCK_R=max(16, triton.next_power_of_2(block_tokens * heads_per_program)),
-        BLOCK_N=block_n, NSPLIT=nsplit, HQN=hq,
+        BLOCK_N=block_n, NSPLIT=nsplit, NSPLIT_MIN=nsplit_min,
+        BPS=_BLOCKS_PER_SPLIT, HQN=hq,
         num_warps=num_warps, num_stages=num_stages,
     )
     if nsplit > 1:
         _bidir_combine_kernel[(m, hq)](
-            part_o, part_lse, out_view,
+            part_o, part_lse, out_view, cache_seqlens,
             part_o.stride(0), part_o.stride(1), part_o.stride(2),
             out_view.stride(0), out_view.stride(1),
-            NSPLIT=nsplit, DV=dv, HQN=hq, num_warps=4,
+            W=block_tokens, BLOCK_N=block_n, BPS=_BLOCKS_PER_SPLIT,
+            NSPLIT=nsplit, NSPLIT_MIN=nsplit_min, DV=dv, HQN=hq, num_warps=4,
         )
     return out
